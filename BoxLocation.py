@@ -5,8 +5,10 @@
 # Tabs: cocaine, cannabis, HIV-neg-nondrug, HIV+nondrug, boxNumber
 #
 # Streamlit Secrets:
-#   GOOGLE_API_KEY = "AIza..."
-#   SPREADSHEET_ID = "1xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+spreadsheet = "1ATbGvDHey-0sGeEP12TBE9bRaPemII-E92-GQpOJ3kc"
+GOOGLE_API_KEY = "AIzaSyCPhrEngtBqF3-jVjfme2gGhR5XcAe9DU0"
+st.write("Secrets loaded:", bool(GOOGLE_API_KEY), bool(spreadsheet_id))
+
 
 import re
 import pandas as pd
@@ -14,7 +16,7 @@ import streamlit as st
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-#st.write("Secrets loaded:", bool(api_key), bool(spreadsheet_id))
+
 
 
 st.set_page_config(page_title="StudyID Lookup", layout="wide")
