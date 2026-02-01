@@ -134,10 +134,17 @@ def build_box_map(box_df: pd.DataFrame) -> dict:
 def row_to_output(row: pd.Series, box_map: dict) -> dict:
     sid = norm_studyid(row.get("StudyID", ""))
     out = {"BoxNumber": box_map.get(sid, row.get("BoxNumber", ""))}
+
     for f in FIELDS_TO_SHOW:
-        if f != "BoxNumber":
+        if f == "BoxNumber":
+            continue
+        elif f == "Date collected":
+            out[f] = format_mmddyy(row.get(f, ""))
+        else:
             out[f] = row.get(f, "")
+
     return out
+
 
 def search_studyid(studyid: str) -> pd.DataFrame:
     sid_norm = norm_studyid(studyid)
