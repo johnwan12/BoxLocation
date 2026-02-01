@@ -7,7 +7,7 @@
 # Streamlit Secrets:
 spreadsheet = "1ATbGvDHey-0sGeEP12TBE9bRaPemII-E92-GQpOJ3kc"
 GOOGLE_API_KEY = "AIzaSyCPhrEngtBqF3-jVjfme2gGhR5XcAe9DU0"
-st.write("Secrets loaded:", bool(GOOGLE_API_KEY), bool(spreadsheet_id))
+#st.write("Secrets loaded:", bool(GOOGLE_API_KEY), bool(spreadsheet_id))
 
 
 import re
