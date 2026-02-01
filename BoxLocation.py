@@ -11,10 +11,14 @@ import re
 import io
 import base64
 
+
+
 import requests
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # streamlit_app.py
 # Streamlit app: search StudyID across multiple Google Sheets tabs (read-only via API key)
