@@ -14,7 +14,7 @@ import streamlit as st
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-st.write("Secrets loaded:", bool(api_key), bool(spreadsheet_id))
+#st.write("Secrets loaded:", bool(api_key), bool(spreadsheet_id))
 
 
 st.set_page_config(page_title="StudyID Lookup", layout="wide")
