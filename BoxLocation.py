@@ -38,6 +38,13 @@ import googleapiclient
 import google.auth
 st.success("Google API libraries loaded successfully")
 
+import streamlit as st
+import googleapiclient
+import google.auth
+
+st.success("✅ Google API libraries loaded")
+
+
 
 import re
 import pandas as pd
