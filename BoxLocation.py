@@ -26,7 +26,7 @@ FIELDS_TO_SHOW = [
 
 # -------------------- Helpers --------------------
 #month/day/year format
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 
 def format_mmddyyyy(x):
@@ -34,19 +34,26 @@ def format_mmddyyyy(x):
         return ""
 
     try:
-        # Already a datetime
+        # Case 1: already datetime
         if isinstance(x, (datetime, pd.Timestamp)):
             return x.strftime("%m/%d/%Y")
 
-        # Parse string / number from Sheets
+        # Case 2: Google Sheets serial number (days since 1899-12-30)
+        if isinstance(x, (int, float)):
+            base = datetime(1899, 12, 30)
+            dt = base + timedelta(days=float(x))
+            return dt.strftime("%m/%d/%Y")
+
+        # Case 3: string date
         dt = pd.to_datetime(x, errors="coerce")
         if pd.isna(dt):
-            return str(x)  # fallback if unparseable
+            return str(x)
 
         return dt.strftime("%m/%d/%Y")
 
     except Exception:
         return str(x)
+
 
 
 
