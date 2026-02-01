@@ -25,6 +25,30 @@ FIELDS_TO_SHOW = [
 ]
 
 # -------------------- Helpers --------------------
+#month/day/year format
+from datetime import datetime
+import pandas as pd
+
+def format_mmddyy(x):
+    if x in ("", None):
+        return ""
+
+    try:
+        # If already datetime (sometimes returned by Sheets)
+        if isinstance(x, (datetime, pd.Timestamp)):
+            return x.strftime("%m/%d/%y")
+
+        # Try parsing string
+        dt = pd.to_datetime(x, errors="coerce")
+        if pd.isna(dt):
+            return str(x)  # fallback: show original
+
+        return dt.strftime("%m/%d/%y")
+
+    except Exception:
+        return str(x)
+
+
 def norm_header(x: str) -> str:
     x = "" if x is None else str(x)
     return re.sub(r"\s+", " ", x.strip())
