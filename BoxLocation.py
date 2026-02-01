@@ -29,24 +29,25 @@ FIELDS_TO_SHOW = [
 from datetime import datetime
 import pandas as pd
 
-def format_mmddyy(x):
+def format_mmddyyyy(x):
     if x in ("", None):
         return ""
 
     try:
-        # If already datetime (sometimes returned by Sheets)
+        # Already a datetime
         if isinstance(x, (datetime, pd.Timestamp)):
-            return x.strftime("%m/%d/%y")
+            return x.strftime("%m/%d/%Y")
 
-        # Try parsing string
+        # Parse string / number from Sheets
         dt = pd.to_datetime(x, errors="coerce")
         if pd.isna(dt):
-            return str(x)  # fallback: show original
+            return str(x)  # fallback if unparseable
 
-        return dt.strftime("%m/%d/%y")
+        return dt.strftime("%m/%d/%Y")
 
     except Exception:
         return str(x)
+
 
 
 def norm_header(x: str) -> str:
@@ -139,11 +140,13 @@ def row_to_output(row: pd.Series, box_map: dict) -> dict:
         if f == "BoxNumber":
             continue
         elif f == "Date collected":
-            out[f] = format_mmddyy(row.get(f, ""))
+            out[f] = format_mmddyyyy(row.get(f, ""))
         else:
             out[f] = row.get(f, "")
 
     return out
+
+
 
 
 def search_studyid(studyid: str) -> pd.DataFrame:
