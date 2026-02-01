@@ -1,24 +1,24 @@
-import streamlit as st
-import pandas as pd
-from datetime import date, datetime, timedelta, timezone
-import hashlib
-import json
-import urllib.request
-import smtplib
-from email.message import EmailMessage
-import time
-import re
-import io
-import base64
+# import streamlit as st
+# import pandas as pd
+# from datetime import date, datetime, timedelta, timezone
+# import hashlib
+# import json
+# import urllib.request
+# import smtplib
+# from email.message import EmailMessage
+# import time
+# import re
+# import io
+# import base64
 
 
 
-import requests
+# import requests
 
-#from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+# #from google.oauth2.service_account import Credentials
+# from googleapiclient.discovery import build
+# from googleapiclient.discovery import build
+# from googleapiclient.errors import HttpError
 
 # streamlit_app.py
 # Streamlit app: search StudyID across multiple Google Sheets tabs (read-only via API key)
@@ -33,6 +33,11 @@ from googleapiclient.errors import HttpError
 # Notes:
 # - API key access works if the sheet is public or shared appropriately for API-key read access.
 # - If your sheet is private and API key fails (403), you need a Service Account instead.
+
+import googleapiclient
+import google.auth
+st.success("Google API libraries loaded successfully")
+
 
 import re
 import pandas as pd
