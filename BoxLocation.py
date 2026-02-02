@@ -33,6 +33,70 @@ if not SPREADSHEET_ID:
     st.stop()
 
 # -------------------- Helpers --------------------
+
+#add new into liquid nitrogen tank 3
+from datetime import datetime
+import pandas as pd
+
+LN3_TAB = "LN3"  # tab name in Google Sheets
+
+def utc_now_str():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def get_sheet_id_by_title(spreadsheet_metadata: dict, title: str):
+    for sh in spreadsheet_metadata.get("sheets", []):
+        props = sh.get("properties", {})
+        if props.get("title") == title:
+            return props.get("sheetId")
+    return None
+
+def ensure_ln3_header(service, spreadsheet_id: str, tab_name: str, header: list[str]):
+    """
+    Ensures LN3 has the header row exactly once.
+    If tab doesn't exist, it creates it.
+    If tab exists but empty, writes header in row 1.
+    """
+    # 1) Fetch spreadsheet metadata (to check tab existence)
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheet_id = get_sheet_id_by_title(meta, tab_name)
+
+    # 2) Create tab if missing
+    if sheet_id is None:
+        req = {
+            "requests": [
+                {"addSheet": {"properties": {"title": tab_name}}}
+            ]
+        }
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body=req
+        ).execute()
+
+    # 3) Check if first row has header
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{tab_name}'!A1:Z1",
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute()
+    values = resp.get("values", [])
+
+    if not values or not values[0] or all(str(x).strip() == "" for x in values[0]):
+        service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{tab_name}'!A1",
+            valueInputOption="RAW",
+            body={"values": [header]},
+        ).execute()
+
+def append_ln3_row(service, spreadsheet_id: str, tab_name: str, row_values: list):
+    service.spreadsheets().values().append(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{tab_name}'!A:Z",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [row_values]},
+    ).execute()
+
+
 def norm_header(x: str) -> str:
     x = "" if x is None else str(x)
     return re.sub(r"\s+", " ", x.strip())
@@ -192,3 +256,115 @@ except HttpError as e:
 except Exception as e:
     st.error("Unexpected error")
     st.code(str(e), language="text")
+
+st.divider()
+st.header("🧊 LN3 — Liquid Nitrogen Tank")
+
+# Load LN3 data (if tab doesn't exist yet, this returns empty df)
+try:
+    ln3_df = read_tab(LN3_TAB)  # your existing read_tab(tab_name) that reads from SPREADSHEET_ID
+except Exception:
+    ln3_df = pd.DataFrame()
+
+# ---------- Add New Data UI ----------
+st.subheader("➕ Add New LN3 Record")
+
+with st.form("ln3_add_form", clear_on_submit=True):
+    rack = st.selectbox("RackNumber", [1, 2, 3, 4, 5, 6], index=0)
+
+    colA, colB, colC = st.columns([1, 1, 1])
+    with colA:
+        hiv_status = st.selectbox("HIV Status", ["HIV+", "HIV-"], index=0)
+    with colB:
+        drug_group = st.selectbox("Drug Group", ["Cocaine", "Cannabis", "Poly"], index=0)
+    with colC:
+        box_suffix = st.text_input("Box # (your label/number)", placeholder="e.g., 12 or A12").strip()
+
+    # Standardized BoxNumber string stored in LN3
+    # Example: HIV+-Cocaine-12
+    box_number = f"{hiv_status}-{drug_group}-{box_suffix}" if box_suffix else f"{hiv_status}-{drug_group}"
+
+    colD, colE = st.columns([1, 2])
+    with colD:
+        tube_prefix = st.selectbox("Tube Prefix", ["GICU", "HCCU"], index=0)
+    with colE:
+        tube_suffix = st.text_input("Tube Suffix (enter)", placeholder="e.g., 00123").strip()
+
+    tube_number = f"{tube_prefix}{tube_suffix}" if tube_suffix else tube_prefix
+
+    tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
+    memo = st.text_area("Memo", placeholder="Optional notes")
+
+    submitted = st.form_submit_button("Submit to LN3", type="primary")
+
+    if submitted:
+        if not box_suffix:
+            st.error("Please enter Box # (your label/number).")
+            st.stop()
+        if not tube_suffix:
+            st.error("Please enter Tube Suffix.")
+            st.stop()
+
+        # Ensure header exists, then append
+        service = sheets_service()
+        header = ["Timestamp", "RackNumber", "BoxNumber", "TubeNumber", "TubeAmount", "Memo"]
+
+        try:
+            ensure_ln3_header(service, SPREADSHEET_ID, LN3_TAB, header)
+
+            row = [
+                utc_now_str(),
+                str(rack),
+                box_number,
+                tube_number,
+                int(tube_amount),
+                memo,
+            ]
+            append_ln3_row(service, SPREADSHEET_ID, LN3_TAB, row)
+            st.success(f"Saved to LN3: {box_number} / {tube_number}")
+
+            # Refresh view
+            ln3_df = read_tab(LN3_TAB)
+
+        except HttpError as e:
+            st.error("Google Sheets API error while writing to LN3.")
+            st.code(str(e), language="text")
+        except Exception as e:
+            st.error("Unexpected error while writing to LN3.")
+            st.code(str(e), language="text")
+
+# Show current LN3 table
+st.subheader("📋 LN3 Inventory Table")
+if ln3_df is None or ln3_df.empty:
+    st.info("LN3 tab has no data yet.")
+else:
+    st.dataframe(ln3_df, use_container_width=True, hide_index=True)
+
+# ---------- Search block ----------
+st.subheader("🔎 Search LN3 by BoxNumber (shows TubeAmount)")
+
+if ln3_df is None or ln3_df.empty or "BoxNumber" not in ln3_df.columns:
+    st.info("No searchable BoxNumber data in LN3 yet.")
+else:
+    # Clean list of BoxNumber options
+    bn = (
+        ln3_df["BoxNumber"]
+        .dropna()
+        .astype(str)
+        .map(lambda x: x.strip())
+    )
+    bn_options = sorted([x for x in bn.unique().tolist() if x])
+
+    selected_bn = st.selectbox("Choose BoxNumber", ["(select)"] + bn_options)
+
+    if selected_bn != "(select)":
+        # Filter and display all columns (including TubeAmount)
+        sub = ln3_df[ln3_df["BoxNumber"].astype(str).str.strip() == selected_bn].copy()
+
+        # Optional: make TubeAmount numeric for consistent display/sorting
+        if "TubeAmount" in sub.columns:
+            sub["TubeAmount"] = pd.to_numeric(sub["TubeAmount"], errors="coerce")
+
+        st.write(f"Records for **{selected_bn}**:")
+        st.dataframe(sub, use_container_width=True, hide_index=True)
+
