@@ -1,32 +1,21 @@
 # BoxLocation.py
-# Complete Streamlit app including:
-# 1) Box Location viewer:
-#    - Select a tab: Cocaine / Cannabis / HIV-neg-nondrug / HIV+nondrug
-#    - Display ALL data for the selected tab
-#    - Select StudyID from that tab -> lookup BoxNumber in "boxNumber" tab
-#      -> If not found, display "Not Found"
+# Box Location + LN3 (Liquid Nitrogen Tank) with auto BoxUID column
 #
-# 2) LN3 Liquid Nitrogen Tank:
-#    - Add new record:
-#        RackNumber: 1..6 (dropdown)
-#        BoxNumber: "HIV status / Drug Group"
-#        BoxUID: auto-generated: LN3-R{rack:02d}-{HIVCODE}-{DRUGCODE}-{NN}
-#              Example: LN3-R02-HP-COC-01
-#              Meaning: Tank LN3; Rack 02; HIV+; Cocaine; serial 01..99
-#        TubeNumber: "TubePrefix TubeInput" (one space)
-#        TubeAmount: user enters
-#        Memo: user enters
-#      -> Save to LN3 (append)
-#    - Search LN3 by BoxNumber (shows all rows/columns incl TubeAmount + BoxUID)
+# LN3 columns:
+#   RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo
 #
-# Streamlit Secrets required:
-#   [google_service_account]  (service account json fields)
-#   [connections.gsheets]
-#   spreadsheet = "YOUR_SPREADSHEET_ID"
+# BoxNumber format: "HIV status / Drug Group"
+# TubeNumber format: "Tube Prefix + one space + Tube Input"
+# BoxUID auto: LN3-R{rack:02d}-{HIVCODE}-{DRUGCODE}-{NN}  (NN=01..99)
+# Example: LN3-R02-HP-COC-01  => Tank LN3; Rack 02; HIV+; Cocaine; serial 01
 #
-# The Google Sheet must be shared with the service account email:
-#   - Viewer is enough for reading tabs
-#   - Editor is required for writing to LN3
+# Streamlit Secrets:
+# [google_service_account]
+# ...
+# [connections.gsheets]
+# spreadsheet="YOUR_SPREADSHEET_ID"
+#
+# Share the Google Sheet with service account email (Editor needed for LN3 writes).
 
 import re
 import pandas as pd
@@ -35,15 +24,11 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# ============================================================
-# Page setup
-# ============================================================
+# -------------------- Page --------------------
 st.set_page_config(page_title="Box Location + LN3", layout="wide")
 st.title("📦 Box Location + 🧊 LN3 Liquid Nitrogen Tank")
 
-# ============================================================
-# Constants
-# ============================================================
+# -------------------- Constants --------------------
 DISPLAY_TABS = ["Cocaine", "Cannabis", "HIV-neg-nondrug", "HIV+nondrug"]
 TAB_MAP = {
     "Cocaine": "cocaine",
@@ -54,18 +39,14 @@ TAB_MAP = {
 BOX_TAB = "boxNumber"
 LN3_TAB = "LN3"
 
-# BoxUID code maps (you can adjust these codes if you prefer different abbreviations)
-HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}  # example shows HIV+ -> HP
+# BoxUID code maps (edit if you want different abbreviations)
+HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}  # Example uses HP for HIV+
 DRUG_CODE = {"Cocaine": "COC", "Cannabis": "CAN", "Poly": "POL"}
 
-# ============================================================
-# Spreadsheet ID (from Streamlit secrets)
-# ============================================================
+# -------------------- Spreadsheet ID --------------------
 SPREADSHEET_ID = st.secrets["connections"]["gsheets"]["spreadsheet"]
 
-# ============================================================
-# Google Sheets service (READ + WRITE) - service account
-# ============================================================
+# -------------------- Google Sheets service (READ + WRITE) --------------------
 @st.cache_resource(show_spinner=False)
 def sheets_service():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -75,9 +56,7 @@ def sheets_service():
     )
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-# ============================================================
-# Helpers
-# ============================================================
+# -------------------- Helpers --------------------
 def safe_strip(x):
     return "" if x is None else str(x).strip()
 
@@ -108,16 +87,10 @@ def read_tab(tab_name: str) -> pd.DataFrame:
             r = r[:n]
         fixed.append(r)
 
-    df = pd.DataFrame(fixed, columns=header)
-    return df
+    return pd.DataFrame(fixed, columns=header)
 
 def build_box_map() -> dict:
-    """
-    Build mapping: StudyID -> BoxNumber from boxNumber tab.
-    Looks for columns:
-      StudyID / Study ID / Study Id / ID
-      BoxNumber / Box Number / Box / Box#
-    """
+    """StudyID -> BoxNumber map from boxNumber tab."""
     df = read_tab(BOX_TAB)
     if df.empty:
         return {}
@@ -149,8 +122,9 @@ def ensure_sheet_exists(service, tab_name: str):
 
 def ensure_ln3_header(service):
     """
-    Ensure LN3 exists and has the required header row.
-    If row 1 is blank, write the header. Otherwise leave as-is.
+    Ensure LN3 exists and contains the BoxUID column in header.
+    If header row is empty, write full header.
+    If header exists but missing BoxUID, we do NOT auto-rewrite (avoid shifting existing data).
     """
     ensure_sheet_exists(service, LN3_TAB)
 
@@ -159,33 +133,43 @@ def ensure_ln3_header(service):
         range=f"'{LN3_TAB}'!A1:Z1",
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
-    first_row = (resp.get("values", [[]]) or [[]])[0]
+    row1 = (resp.get("values", [[]]) or [[]])[0]
+    row1_clean = [safe_strip(x) for x in row1]
 
-    if first_row and any(safe_strip(x) for x in first_row):
+    required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo"]
+
+    # If row1 is blank -> set header
+    if (not row1_clean) or all(x == "" for x in row1_clean):
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"'{LN3_TAB}'!A1",
+            valueInputOption="RAW",
+            body={"values": [required]},
+        ).execute()
         return
 
-    header = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo"]
-    service.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{LN3_TAB}'!A1",
-        valueInputOption="RAW",
-        body={"values": [header]},
-    ).execute()
+    # If LN3 exists already, we assume user already set the header.
+    # We only warn if BoxUID is missing.
+    if "BoxUID" not in row1_clean:
+        st.warning(
+            "LN3 header exists but missing column 'BoxUID'. "
+            "Please add a new column named 'BoxUID' in LN3 header row (row 1) to store BoxUID."
+        )
 
-def append_ln3_row(service, row):
+def append_ln3_row(service, row_values: list):
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{LN3_TAB}'!A:Z",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
-        body={"values": [row]},
+        body={"values": [row_values]},
     ).execute()
 
 def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hiv_status: str, drug_group: str) -> str:
     """
     BoxUID format:
       LN3-R{rack:02d}-{HIVCODE}-{DRUGCODE}-{NN}
-    where NN is a 2-digit sequence 01..99 within the same (rack + HIVCODE + DRUGCODE).
+    NN: 01..99, sequence within same Rack + HIVCODE + DRUGCODE.
     """
     rack2 = f"{int(rack):02d}"
     hiv_code = HIV_CODE.get(hiv_status, "HX")
@@ -201,14 +185,13 @@ def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hiv_status: str, drug_g
                 if m:
                     try:
                         n = int(m.group(1))
-                        if n > max_n:
-                            max_n = n
+                        max_n = max(max_n, n)
                     except ValueError:
                         pass
 
     next_n = max_n + 1
     if next_n > 99:
-        raise ValueError(f"BoxUID sequence exceeded 99 for {prefix}**. Please archive/rename or use another rack/box type.")
+        raise ValueError(f"BoxUID sequence exceeded 99 for {prefix}**")
     return f"{prefix}{next_n:02d}"
 
 # ============================================================
@@ -220,16 +203,14 @@ with st.sidebar:
     st.caption(f"Spreadsheet: {SPREADSHEET_ID[:10]}...")
 
 # ============================================================
-# 1) BOX LOCATION SECTION
+# 1) BOX LOCATION
 # ============================================================
 st.header("📦 Box Location")
 
 sheet_tab = TAB_MAP[selected_display_tab]
 
 try:
-    with st.spinner(f"Loading tab: {selected_display_tab} ..."):
-        df = read_tab(sheet_tab)
-
+    df = read_tab(sheet_tab)
     if df.empty:
         st.warning(f"No data found in tab: {selected_display_tab}")
     else:
@@ -238,14 +219,9 @@ try:
 
         st.subheader("🔎 StudyID → BoxNumber (from boxNumber tab)")
         if "StudyID" not in df.columns:
-            st.info("This tab does not have a 'StudyID' column, so lookup is unavailable.")
+            st.info("This tab does not have a 'StudyID' column.")
         else:
-            studyids = (
-                df["StudyID"]
-                .dropna()
-                .astype(str)
-                .map(lambda x: safe_strip(x))
-            )
+            studyids = df["StudyID"].dropna().astype(str).map(lambda x: safe_strip(x))
             options = sorted([s for s in studyids.unique().tolist() if s])
 
             selected_studyid = st.selectbox("Select StudyID", ["(select)"] + options)
@@ -266,7 +242,7 @@ except Exception as e:
     st.code(str(e), language="text")
 
 # ============================================================
-# 2) LN3 SECTION
+# 2) LN3 LIQUID NITROGEN TANK
 # ============================================================
 st.divider()
 st.header("🧊 LN3 Liquid Nitrogen Tank")
@@ -292,29 +268,29 @@ with st.form("add_ln3", clear_on_submit=True):
     # BoxNumber format: HIV status / Drug Group
     box_number = f"{hiv_status} / {drug_group}"
 
-    # TubeNumber format: TubePrefix + one space + TubeInput
     c3, c4 = st.columns(2)
     with c3:
         tube_prefix = st.selectbox("Tube Prefix", ["GICU", "HCCU"], index=0)
     with c4:
         tube_input = st.text_input("Tube Input", placeholder="e.g., 00123").strip()
 
+    # TubeNumber stays unchanged: Tube Prefix + Tube Input (one space)
     tube_number = f"{tube_prefix} {tube_input}" if tube_input else ""
 
     tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
     memo = st.text_area("Memo", placeholder="Optional notes")
 
-    # Preview BoxUID (auto) before saving
+    # Preview BoxUID
     preview_boxuid = ""
-    preview_error = ""
+    preview_err = ""
     try:
         preview_boxuid = compute_next_boxuid(ln3_df, rack, hiv_status, drug_group)
     except Exception as e:
-        preview_error = str(e)
+        preview_err = str(e)
 
     st.markdown("**BoxUID (auto):**")
-    if preview_error:
-        st.error(preview_error)
+    if preview_err:
+        st.error(preview_err)
     else:
         st.info(preview_boxuid)
 
@@ -329,21 +305,21 @@ with st.form("add_ln3", clear_on_submit=True):
             service = sheets_service()
             ensure_ln3_header(service)
 
-            # Recompute to be safe at save-time
+            # Recompute at save time
             box_uid = compute_next_boxuid(ln3_df, rack, hiv_status, drug_group)
 
+            # Append row with NEW BoxUID column, TubeNumber unchanged
             row = [
                 int(rack),
                 box_number,
-                box_uid,
-                tube_number,
+                box_uid,         # <-- new column
+                tube_number,     # unchanged rule
                 int(tube_amount),
                 memo,
             ]
             append_ln3_row(service, row)
             st.success(f"Saved: {box_uid} | {box_number} | {tube_number}")
 
-            # Refresh LN3 data after write
             ln3_df = read_tab(LN3_TAB)
 
         except HttpError as e:
@@ -372,7 +348,7 @@ if (not ln3_df.empty) and ("BoxNumber" in ln3_df.columns):
     if selected_box != "(select)":
         result = ln3_df[ln3_df["BoxNumber"].astype(str).map(safe_strip) == selected_box].copy()
 
-        # Ensure TubeAmount displays as numeric when possible
+        # Ensure TubeAmount numeric if possible
         if "TubeAmount" in result.columns:
             result["TubeAmount"] = pd.to_numeric(result["TubeAmount"], errors="coerce")
 
