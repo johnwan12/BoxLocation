@@ -212,7 +212,9 @@ if do_search:
 
     try:
         with st.spinner("Searching..."):
-            results = search_studyid(studyid)
+            #results = search_studyid(studyid)
+            results = search_studyid(studyid, spreadsheet_id, api_key)
+
 
         if results.empty:
             st.info(f"No results found for StudyID = {studyid}")
