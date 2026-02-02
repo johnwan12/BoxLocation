@@ -2,7 +2,7 @@
 # Complete Streamlit app (Box Location + LN3 Liquid Nitrogen Tank)
 #
 # ✅ Box Location:
-#   - User selects tab: Cocaine / Cannabis / HIV-neg-nondrug / HIV+nondrug
+#   - User selects a tab: Cocaine / Cannabis / HIV-neg-nondrug / HIV+nondrug
 #   - Display all data in selected tab
 #   - Select StudyID -> look up BoxNumber in boxNumber tab
 #     - If not found => "Not Found"
@@ -15,19 +15,19 @@
 #       TubeNumber: "TubePrefix TubeInput" (one space)
 #       TubeAmount: user input
 #       Memo: user input
-#       QRCodeLink: auto-generated (Google Chart QR URL) and written to sheet
+#       QRCodeLink: auto-generated (QuickChart PNG URL) and written to sheet
 #   - Search by BoxNumber: shows all matching rows (incl TubeAmount, BoxUID, QRCodeLink)
-#   - Also shows QR preview + download button on submit
+#   - Shows QR preview + download button on submit
 #
-# Assumptions:
-#   - You already added column "QRCodeLink" in LN3 header row.
+# IMPORTANT:
+#   - LN3 header row (row 1) should include these columns (in this order is best):
+#       RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo | QRCodeLink
+#   - Sheet must be shared with the service account email (Editor required for LN3 writes).
 #
-# Streamlit Secrets required:
+# Streamlit Secrets:
 #   [google_service_account]  (service account json fields)
 #   [connections.gsheets]
 #   spreadsheet = "YOUR_SPREADSHEET_ID"
-#
-# Share the Google Sheet with the service account email (Editor required for LN3 writes).
 
 import re
 import urllib.parse
@@ -55,13 +55,13 @@ TAB_MAP = {
 BOX_TAB = "boxNumber"
 LN3_TAB = "LN3"
 
-# Codes
+# Codes for BoxNumber + BoxUID
 HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}
 DRUG_CODE = {"Cocaine": "COC", "Cannabis": "CAN", "Poly": "POL"}
 
 BOXUID_RE = re.compile(r"^LN3-R\d{2}-(HP|HN)-(COC|CAN|POL)-\d{2}$")
 
-# 1cm x 1cm approximate pixels at 300 DPI: ~118 px (1 inch=2.54cm, 300dpi => 118px/cm)
+# 1 cm ~ 118 px at 300 DPI (approx). You can increase to 236 for higher DPI labels.
 QR_PX = 118
 
 # -------------------- Spreadsheet ID --------------------
@@ -131,23 +131,22 @@ def build_box_map() -> dict:
             m[sid] = bx
     return m
 
-def ensure_ln3_header_exists_and_has_qrcol(service):
+def ensure_ln3_header(service):
     """
     If LN3 header row is blank, write expected header.
-    If LN3 exists but missing QRCodeLink or BoxUID columns, warn user (do not auto-shift columns).
+    If LN3 exists but missing required columns, show warning (do not auto-shift existing columns).
     """
-    # Fetch row 1
+    expected = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
+
     resp = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{LN3_TAB}'!A1:Z1",
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
+
     row1 = (resp.get("values", [[]]) or [[]])[0]
     row1 = [safe_strip(x) for x in row1]
 
-    expected = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
-
-    # If blank header, set it
     if (not row1) or all(x == "" for x in row1):
         service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID,
@@ -160,9 +159,9 @@ def ensure_ln3_header_exists_and_has_qrcol(service):
     missing = [c for c in expected if c not in row1]
     if missing:
         st.warning(
-            "LN3 header row exists but is missing columns: "
+            "LN3 header exists but missing columns: "
             + ", ".join(missing)
-            + ". Please add them to LN3 header row (row 1) to prevent misalignment."
+            + ". Please add them to row 1 (header) to prevent data misalignment."
         )
 
 def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: str) -> str:
@@ -190,18 +189,22 @@ def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: 
 
 def qr_link_for_boxuid(box_uid: str, px: int = QR_PX) -> str:
     """
-    Use Google Chart API to generate QR image (no hosting required).
-    Clicking the URL opens a PNG that can be downloaded.
+    QuickChart QR endpoint returns a PNG.
+    Docs: https://quickchart.io/documentation/qr-codes/
     """
-    # URL-encode payload
-    payload = urllib.parse.quote(box_uid, safe="")
-    return f"https://chart.googleapis.com/chart?cht=qr&chs={px}x{px}&chld=M|1&chl={payload}"
+    text = urllib.parse.quote(box_uid, safe="")
+    # ecLevel=Q gives stronger error correction; margin=1 keeps some quiet zone
+    return f"https://quickchart.io/qr?text={text}&size={px}&ecLevel=Q&margin=1"
 
 def fetch_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url) as resp:
         return resp.read()
 
 def append_ln3_row(service, row_values: list):
+    """
+    Append row values in this order:
+      RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo | QRCodeLink
+    """
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{LN3_TAB}'!A:Z",
@@ -265,14 +268,14 @@ st.header("🧊 LN3 Liquid Nitrogen Tank")
 
 service = sheets_service()
 
-# Load LN3 data
+# Load LN3 data (for sequencing)
 try:
     ln3_df = read_tab(LN3_TAB)
 except Exception:
     ln3_df = pd.DataFrame()
 
-# Ensure header contains QRCodeLink (will warn if missing)
-ensure_ln3_header_exists_and_has_qrcol(service)
+# Ensure LN3 header (won't overwrite existing non-empty header)
+ensure_ln3_header(service)
 
 # ---------- Add New LN3 Record ----------
 st.subheader("➕ Add LN3 Record")
@@ -289,7 +292,7 @@ with st.form("ln3_add", clear_on_submit=True):
     hp_hn = HIV_CODE[hiv_status]
     drug_code = DRUG_CODE[drug_group]
 
-    # BoxNumber should be code like: HP-CAN
+    # BoxNumber code like: HP-CAN
     box_number = f"{hp_hn}-{drug_code}"
 
     c3, c4 = st.columns(2)
@@ -298,16 +301,14 @@ with st.form("ln3_add", clear_on_submit=True):
     with c4:
         tube_input = st.text_input("Tube Input", placeholder="e.g., 01 005").strip()
 
-    # TubeNumber stays unchanged: Tube Prefix + one space + Tube Input
+    # TubeNumber: prefix + one space + input
     tube_number = f"{tube_prefix} {tube_input}" if tube_input else ""
 
     tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
     memo = st.text_area("Memo (optional)")
 
-    # Preview BoxUID and QR
-    preview_uid = ""
-    preview_qr = ""
-    preview_err = ""
+    # Preview BoxUID and QRCodeLink
+    preview_uid, preview_qr, preview_err = "", "", ""
     try:
         preview_uid = compute_next_boxuid(ln3_df, rack, hp_hn, drug_code)
         preview_qr = qr_link_for_boxuid(preview_uid)
@@ -320,11 +321,11 @@ with st.form("ln3_add", clear_on_submit=True):
     else:
         st.info(preview_uid)
 
-    st.markdown("**QRCode (auto, ~1cm x 1cm):**")
-    if preview_err:
-        st.info("QR preview unavailable until BoxUID can be generated.")
-    else:
+    st.markdown("**QR Preview (~1cm x 1cm):**")
+    if preview_qr:
         st.image(preview_qr, width=QR_PX)
+    else:
+        st.info("QR preview unavailable until BoxUID can be generated.")
 
     submitted = st.form_submit_button("Save to LN3", type="primary")
 
@@ -334,14 +335,11 @@ with st.form("ln3_add", clear_on_submit=True):
             st.stop()
 
         try:
-            # Recompute at save time (avoid conflicts if others added rows)
-            if ln3_df is None:
-                ln3_df = pd.DataFrame()
-
+            # Recompute at save-time
             box_uid = compute_next_boxuid(ln3_df, rack, hp_hn, drug_code)
             qr_link = qr_link_for_boxuid(box_uid)
 
-            # Append row order MUST match LN3 header order:
+            # Append row order MUST match header order:
             # RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo | QRCodeLink
             row = [
                 int(rack),
@@ -355,10 +353,10 @@ with st.form("ln3_add", clear_on_submit=True):
             append_ln3_row(service, row)
             st.success(f"Saved ✅ {box_uid}")
 
-            # Refresh LN3 data after write
+            # Refresh LN3 data
             ln3_df = read_tab(LN3_TAB)
 
-            # Provide immediate download button (PNG)
+            # Download QR PNG (from QRCodeLink)
             try:
                 png_bytes = fetch_bytes(qr_link)
                 st.download_button(
@@ -367,7 +365,7 @@ with st.form("ln3_add", clear_on_submit=True):
                     file_name=f"{box_uid}.png",
                     mime="image/png",
                 )
-                st.caption("You can also click the QRCodeLink in the sheet to open the PNG and download.")
+                st.caption("QRCodeLink is also stored in the sheet and is clickable.")
             except Exception as e:
                 st.warning(f"Saved, but QR download preview failed: {e}")
 
@@ -395,9 +393,10 @@ if ln3_df is not None and (not ln3_df.empty) and ("BoxNumber" in ln3_df.columns)
         res = ln3_df[ln3_df["BoxNumber"].astype(str).map(safe_strip) == chosen].copy()
         if "TubeAmount" in res.columns:
             res["TubeAmount"] = pd.to_numeric(res["TubeAmount"], errors="coerce")
+
         st.dataframe(res, use_container_width=True, hide_index=True)
 
-        # Optional: quick QR preview for the first row in result
+        # QR preview for first row in results (if available)
         if "BoxUID" in res.columns and "QRCodeLink" in res.columns and len(res) > 0:
             first_uid = safe_strip(res.iloc[0].get("BoxUID", ""))
             first_qr = safe_strip(res.iloc[0].get("QRCodeLink", ""))
