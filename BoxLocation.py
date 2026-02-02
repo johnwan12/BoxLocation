@@ -192,7 +192,7 @@ def search_studyid(studyid: str, spreadsheet_id: str, api_key: str) -> pd.DataFr
     for c in ordered:
         if c not in out_df.columns:
             out_df[c] = ""
-            st.info(f"StudyID {studyid} is not in 'boxNumber' tab (or has no BoxNumber)
+            
     return out_df[ordered]
 
 
