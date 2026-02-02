@@ -141,7 +141,7 @@ def build_box_map(box_df: pd.DataFrame) -> dict:
 
 def row_to_output(row: pd.Series, box_map: dict) -> dict:
     sid = norm_studyid(row.get("StudyID", ""))
-    out = {"BoxNumber": box_map.get(sid, row.get("BoxNumber", ""))}
+    out = {"BoxNumber": box_map.get(sid, "")}  # ONLY from boxNumber tab
 
     for f in FIELDS_TO_SHOW:
         if f == "BoxNumber":
@@ -156,33 +156,45 @@ def row_to_output(row: pd.Series, box_map: dict) -> dict:
 
 
 
-def search_studyid(studyid: str) -> pd.DataFrame:
+
+def search_studyid(studyid: str, spreadsheet_id: str, api_key: str) -> pd.DataFrame:
     sid_norm = norm_studyid(studyid)
 
-    box_df = read_tab(BOX_TAB)
+    # Load boxNumber tab and build mapping
+    box_df = read_tab(spreadsheet_id, BOX_TAB, api_key)
     box_map = build_box_map(box_df)
+
+    # GATEKEEPER: StudyID must exist in boxNumber tab
+    if sid_norm not in box_map or str(box_map.get(sid_norm, "")).strip() == "":
+        return pd.DataFrame()  # do not show anything
 
     hits = []
     for tab in TABS_TO_SEARCH:
-        df = read_tab(tab)
+        df = read_tab(spreadsheet_id, tab, api_key)
         if df.empty or "StudyID" not in df.columns:
             continue
+
         df["_sid"] = df["StudyID"].apply(norm_studyid)
         sub = df[df["_sid"] == sid_norm]
+
         for _, r in sub.iterrows():
             rec = row_to_output(r, box_map)
             rec["SourceTab"] = tab
             hits.append(rec)
 
     if not hits:
+        # Optional: if you want to still show BoxNumber even if no sample rows found,
+        # you can return a single-row table here. Otherwise keep empty.
         return pd.DataFrame()
 
-    out = pd.DataFrame(hits)
+    out_df = pd.DataFrame(hits)
     ordered = ["SourceTab"] + FIELDS_TO_SHOW
     for c in ordered:
-        if c not in out.columns:
-            out[c] = ""
-    return out[ordered]
+        if c not in out_df.columns:
+            out_df[c] = ""
+            st.info(f"StudyID {studyid} is not in 'boxNumber' tab (or has no BoxNumber)
+    return out_df[ordered]
+
 
 # -------------------- UI --------------------
 with st.sidebar:
