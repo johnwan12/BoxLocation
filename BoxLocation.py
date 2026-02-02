@@ -3,7 +3,8 @@
 # 1) View all data from a selected tab: Cocaine / Cannabis / HIV-neg-nondrug / HIV+nondrug
 # 2) StudyID -> BoxNumber lookup from boxNumber tab (if missing => "Not Found")
 # 3) LN3 (liquid nitrogen tank) inventory:
-#    - Add new record (RackNumber, BoxNumber=HIV status + Drug Group, TubeNumber, TubeAmount, Memo)
+#    - Add new record (RackNumber, BoxNumber=HIV status + Drug Group,
+#      TubeNumber = TubePrefix + one space + TubeInput, TubeAmount, Memo)
 #    - Search LN3 by BoxNumber (shows TubeAmount and all columns)
 #
 # Secrets required (Streamlit Cloud -> App -> Settings -> Secrets):
@@ -11,7 +12,8 @@
 # [connections.gsheets]
 # spreadsheet = "YOUR_SPREADSHEET_ID"
 #
-# The Google Sheet must be shared with the service account email (Editor needed for LN3 writes).
+# The Google Sheet must be shared with the service account email
+# (Editor needed for LN3 writes).
 
 import re
 from datetime import datetime, timedelta
@@ -83,6 +85,14 @@ def format_mmddyyyy(x):
     except Exception:
         return str(x)
 
+def maybe_format_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if "Date collected" in df.columns:
+        df = df.copy()
+        df["Date collected"] = df["Date collected"].apply(format_mmddyyyy)
+    return df
+
 def utc_now_str():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -91,7 +101,7 @@ def sheets_service():
     if "google_service_account" not in st.secrets:
         raise KeyError('Missing [google_service_account] in secrets.toml')
 
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # read + write (needed for LN3 append)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # read + write
     creds = Credentials.from_service_account_info(
         dict(st.secrets["google_service_account"]),
         scopes=scopes
@@ -129,19 +139,9 @@ def read_tab(tab_name: str) -> pd.DataFrame:
 
     return pd.DataFrame(fixed, columns=header)
 
-def maybe_format_date_col(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    if "Date collected" in df.columns:
-        df = df.copy()
-        df["Date collected"] = df["Date collected"].apply(format_mmddyyyy)
-    return df
-
 @st.cache_data(ttl=300, show_spinner=False)
 def build_box_map() -> dict:
-    """
-    Build mapping: normalized StudyID -> BoxNumber from boxNumber tab.
-    """
+    """Map normalized StudyID -> BoxNumber from boxNumber tab."""
     df = read_tab(BOX_TAB)
     if df.empty:
         return {}
@@ -170,11 +170,7 @@ def get_sheet_id_by_title(spreadsheet_metadata: dict, title: str):
     return None
 
 def ensure_header_and_sheet(service, spreadsheet_id: str, tab_name: str, header: list[str]):
-    """
-    Ensure tab exists and has header row.
-    - If tab missing: create it.
-    - If A1 row empty: set header in row 1.
-    """
+    """Ensure tab exists and has header row."""
     meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     sheet_id = get_sheet_id_by_title(meta, tab_name)
 
@@ -184,7 +180,6 @@ def ensure_header_and_sheet(service, spreadsheet_id: str, tab_name: str, header:
             body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
         ).execute()
 
-    # Check first row
     resp = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=f"'{tab_name}'!A1:Z1",
@@ -210,16 +205,17 @@ def append_row(service, spreadsheet_id: str, tab_name: str, row_values: list):
         body={"values": [row_values]},
     ).execute()
 
-# -------------------- Sidebar: pick a group tab --------------------
+# -------------------- Sidebar --------------------
 with st.sidebar:
     st.subheader("Group Tabs")
     selected_display_tab = st.selectbox("Select a tab", DISPLAY_TABS, index=0)
     st.caption(f"Spreadsheet: {SPREADSHEET_ID[:10]}...")
 
-# -------------------- Section 1: show all data for selected tab --------------------
+# -------------------- Main --------------------
 sheet_tab = TAB_MAP[selected_display_tab]
 
 try:
+    # ---------- Section 1: show all data ----------
     with st.spinner(f"Loading tab: {selected_display_tab} ..."):
         df = read_tab(sheet_tab)
     df = maybe_format_date_col(df)
@@ -230,20 +226,14 @@ try:
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # -------------------- Section 2: StudyID -> BoxNumber lookup --------------------
+    # ---------- Section 2: StudyID -> BoxNumber ----------
     st.divider()
     st.subheader("🔎 StudyID → BoxNumber (from boxNumber tab)")
 
     if df.empty or "StudyID" not in df.columns:
         st.info("No StudyID column found in this tab, so StudyID lookup is unavailable.")
     else:
-        # Build StudyID options from current selected tab
-        studyids = (
-            df["StudyID"]
-            .dropna()
-            .astype(str)
-            .map(lambda x: x.strip())
-        )
+        studyids = df["StudyID"].dropna().astype(str).map(lambda x: x.strip())
         studyid_options = sorted([s for s in studyids.unique().tolist() if s])
 
         selected_studyid = st.selectbox("Select StudyID", ["(select)"] + studyid_options)
@@ -252,18 +242,16 @@ try:
             box_map = build_box_map()
             box = box_map.get(norm_studyid(selected_studyid), "")
 
+            st.markdown("**BoxNumber:**")
             if str(box).strip() == "":
-                st.markdown("**BoxNumber:**")
                 st.error("Not Found")
             else:
-                st.markdown("**BoxNumber:**")
                 st.success(str(box))
 
-    # -------------------- Section 3: LN3 --------------------
+    # ---------- Section 3: LN3 ----------
     st.divider()
     st.header("🧊 LN3 — Liquid Nitrogen Tank")
 
-    # Load LN3 table (may be empty if tab missing or no data)
     try:
         ln3_df = read_tab(LN3_TAB)
     except Exception:
@@ -281,16 +269,20 @@ try:
         with c2:
             drug_group = st.selectbox("Drug Group", ["Cocaine", "Cannabis", "Poly"], index=0)
 
-        # BoxNumber is ONLY HIV status + Drug Group
+        # BoxNumber = HIV status + Drug Group
         box_number = f"{hiv_status}-{drug_group}"
 
         c3, c4 = st.columns([1, 2])
         with c3:
             tube_prefix = st.selectbox("Tube Prefix", ["GICU", "HCCU"], index=0)
         with c4:
-            tube_suffix = st.text_input("Tube Suffix (enter)", placeholder="e.g., 00123").strip()
+            tube_input = st.text_input(
+                "Tube Input (saved as: PREFIX + space + INPUT)",
+                placeholder="e.g., 00123 → saved as 'GICU 00123'",
+            ).strip()
 
-        tube_number = f"{tube_prefix}{tube_suffix}" if tube_suffix else tube_prefix
+        # TubeNumber = TubePrefix + one space + TubeInput
+        tube_number = f"{tube_prefix} {tube_input}" if tube_input else ""
 
         tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
         memo = st.text_area("Memo", placeholder="Optional notes")
@@ -298,16 +290,27 @@ try:
         submit_ln3 = st.form_submit_button("Submit to LN3", type="primary")
 
         if submit_ln3:
-            if not tube_suffix:
-                st.error("Please enter Tube Suffix.")
+            if not tube_input:
+                st.error("Please enter Tube Input.")
                 st.stop()
 
             service = sheets_service()
-            header = ["Timestamp", "RackNumber", "BoxNumber", "TubeNumber", "TubeAmount", "Memo"]
+
+            # LN3 schema (keeps TubeNumber and its parts)
+            header = ["Timestamp", "RackNumber", "BoxNumber", "TubePrefix", "TubeInput", "TubeNumber", "TubeAmount", "Memo"]
 
             try:
                 ensure_header_and_sheet(service, SPREADSHEET_ID, LN3_TAB, header)
-                row = [utc_now_str(), str(rack), box_number, tube_number, int(tube_amount), memo]
+                row = [
+                    utc_now_str(),
+                    str(rack),
+                    box_number,
+                    tube_prefix,
+                    tube_input,
+                    tube_number,
+                    int(tube_amount),
+                    memo,
+                ]
                 append_row(service, SPREADSHEET_ID, LN3_TAB, row)
                 st.success(f"Saved to LN3: {box_number} / {tube_number}")
 
@@ -340,7 +343,6 @@ try:
         if selected_bn != "(select)":
             sub = ln3_df[ln3_df["BoxNumber"].astype(str).str.strip() == selected_bn].copy()
 
-            # make TubeAmount numeric if present (for clean display/sorting)
             if "TubeAmount" in sub.columns:
                 sub["TubeAmount"] = pd.to_numeric(sub["TubeAmount"], errors="coerce")
 
