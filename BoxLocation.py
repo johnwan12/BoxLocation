@@ -24,6 +24,14 @@ FIELDS_TO_SHOW = [
     "All collected by AH",
 ]
 
+# ---------- Secrets ----------
+api_key = st.secrets.get("GOOGLE_API_KEY", "")
+spreadsheet_id = st.secrets.get("SPREADSHEET_ID", "")
+
+if not spreadsheet_id:
+    st.error("Missing SPREADSHEET_ID in Streamlit Secrets.")
+    st.stop()
+
 # -------------------- Helpers --------------------
 #month/day/year format
 from datetime import datetime, timedelta
@@ -212,19 +220,16 @@ if do_search:
 
     try:
         with st.spinner("Searching..."):
-            #results = search_studyid(studyid)
             results = search_studyid(studyid, spreadsheet_id, api_key)
 
-
         if results.empty:
-            st.info(f"No results found for StudyID = {studyid}")
+            st.info(
+                f"StudyID {studyid} is not in 'boxNumber' tab or has no BoxNumber. Nothing to display."
+            )
         else:
             st.success(f"Found {len(results)} record(s).")
             st.dataframe(results, use_container_width=True, hide_index=True)
 
-    except HttpError as e:
-        st.error("Google Sheets API error")
-        st.code(str(e), language="text")
     except Exception as e:
-        st.error("App error")
+        st.error("Unexpected error")
         st.code(str(e), language="text")
