@@ -1,7 +1,8 @@
 import re
+from datetime import datetime, timedelta
+
 import pandas as pd
 import streamlit as st
-
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -24,35 +25,38 @@ FIELDS_TO_SHOW = [
     "All collected by AH",
 ]
 
-# ---------- Secrets ----------
-api_key = st.secrets.get("GOOGLE_API_KEY", "")
-spreadsheet_id = st.secrets.get("SPREADSHEET_ID", "")
+# -------------------- Secrets / Spreadsheet ID --------------------
+def get_spreadsheet_id() -> str:
+    # Recommended: use Streamlit connection secret
+    try:
+        return st.secrets["connections"]["gsheets"]["spreadsheet"]
+    except Exception:
+        # Optional fallback if you choose to add it:
+        return st.secrets.get("SPREADSHEET_ID", "")
 
-if not spreadsheet_id:
-    st.error("Missing SPREADSHEET_ID in Streamlit Secrets.")
+SPREADSHEET_ID = get_spreadsheet_id()
+if not SPREADSHEET_ID:
+    st.error('Missing spreadsheet id. Add this to Secrets:\n\n[connections.gsheets]\nspreadsheet = "YOUR_SHEET_ID"')
     st.stop()
 
 # -------------------- Helpers --------------------
-#month/day/year format
-from datetime import datetime, timedelta
-import pandas as pd
-
 def format_mmddyyyy(x):
+    """Display as MM/DD/YYYY. Handles strings, datetimes, and Google Sheets serial numbers."""
     if x in ("", None):
         return ""
 
     try:
-        # Case 1: already datetime
+        # Already datetime
         if isinstance(x, (datetime, pd.Timestamp)):
             return x.strftime("%m/%d/%Y")
 
-        # Case 2: Google Sheets serial number (days since 1899-12-30)
-        if isinstance(x, (int, float)):
+        # Google Sheets serial number (days since 1899-12-30)
+        if isinstance(x, (int, float)) and not pd.isna(x):
             base = datetime(1899, 12, 30)
             dt = base + timedelta(days=float(x))
             return dt.strftime("%m/%d/%Y")
 
-        # Case 3: string date
+        # Parse string
         dt = pd.to_datetime(x, errors="coerce")
         if pd.isna(dt):
             return str(x)
@@ -61,9 +65,6 @@ def format_mmddyyyy(x):
 
     except Exception:
         return str(x)
-
-
-
 
 def norm_header(x: str) -> str:
     x = "" if x is None else str(x)
@@ -85,25 +86,14 @@ def sheets_service():
     )
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-def get_spreadsheet_id() -> str:
-    # Prefer your existing connections.gsheets.spreadsheet
-    try:
-        return st.secrets["connections"]["gsheets"]["spreadsheet"]
-    except Exception:
-        # Optional fallback if you ever add SPREADSHEET_ID
-        return st.secrets.get("SPREADSHEET_ID", "")
-
 @st.cache_data(ttl=300, show_spinner=False)
 def read_tab(tab_name: str) -> pd.DataFrame:
-    spreadsheet_id = get_spreadsheet_id()
-    if not spreadsheet_id:
-        raise KeyError('Missing [connections.gsheets].spreadsheet (or SPREADSHEET_ID) in secrets.toml')
-
+    """Read a whole tab into DataFrame; first row is header."""
     svc = sheets_service()
     rng = f"'{tab_name}'!A1:ZZ"
 
     resp = svc.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
+        spreadsheetId=SPREADSHEET_ID,
         range=rng,
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
@@ -128,6 +118,7 @@ def read_tab(tab_name: str) -> pd.DataFrame:
     return pd.DataFrame(fixed, columns=header)
 
 def build_box_map(box_df: pd.DataFrame) -> dict:
+    """Map normalized StudyID -> BoxNumber from boxNumber tab."""
     if box_df.empty:
         return {}
 
@@ -143,11 +134,13 @@ def build_box_map(box_df: pd.DataFrame) -> dict:
     m = {}
     for _, r in box_df.iterrows():
         sid = norm_studyid(r.get(study_col, ""))
-        if sid:
-            m[sid] = r.get(box_col, "")
+        bx = r.get(box_col, "")
+        if sid and str(bx).strip() != "":
+            m[sid] = bx
     return m
 
 def row_to_output(row: pd.Series, box_map: dict) -> dict:
+    """BoxNumber ONLY from boxNumber tab; Date collected formatted."""
     sid = norm_studyid(row.get("StudyID", ""))
     out = {"BoxNumber": box_map.get(sid, "")}  # ONLY from boxNumber tab
 
@@ -161,24 +154,20 @@ def row_to_output(row: pd.Series, box_map: dict) -> dict:
 
     return out
 
-
-
-
-
-def search_studyid(studyid: str, spreadsheet_id: str, api_key: str) -> pd.DataFrame:
+def search_studyid(studyid: str) -> pd.DataFrame:
+    """Gatekeeper: StudyID must exist in boxNumber tab; otherwise return empty."""
     sid_norm = norm_studyid(studyid)
 
-    # Load boxNumber tab and build mapping
-    box_df = read_tab(spreadsheet_id, BOX_TAB, api_key)
+    box_df = read_tab(BOX_TAB)
     box_map = build_box_map(box_df)
 
-    # GATEKEEPER: StudyID must exist in boxNumber tab
-    if sid_norm not in box_map or str(box_map.get(sid_norm, "")).strip() == "":
-        return pd.DataFrame()  # do not show anything
+    # GATEKEEPER
+    if sid_norm not in box_map:
+        return pd.DataFrame()
 
     hits = []
     for tab in TABS_TO_SEARCH:
-        df = read_tab(spreadsheet_id, tab, api_key)
+        df = read_tab(tab)
         if df.empty or "StudyID" not in df.columns:
             continue
 
@@ -191,8 +180,6 @@ def search_studyid(studyid: str, spreadsheet_id: str, api_key: str) -> pd.DataFr
             hits.append(rec)
 
     if not hits:
-        # Optional: if you want to still show BoxNumber even if no sample rows found,
-        # you can return a single-row table here. Otherwise keep empty.
         return pd.DataFrame()
 
     out_df = pd.DataFrame(hits)
@@ -200,15 +187,14 @@ def search_studyid(studyid: str, spreadsheet_id: str, api_key: str) -> pd.DataFr
     for c in ordered:
         if c not in out_df.columns:
             out_df[c] = ""
-            
     return out_df[ordered]
-
 
 # -------------------- UI --------------------
 with st.sidebar:
     st.subheader("Tabs")
     st.write("Search:", TABS_TO_SEARCH)
     st.write("Box mapping:", BOX_TAB)
+    st.caption(f"Spreadsheet ID: {SPREADSHEET_ID[:10]}...")
 
 studyid = st.text_input("Enter StudyID", placeholder="e.g., S1234").strip()
 do_search = st.button("Search", type="primary")
@@ -220,16 +206,17 @@ if do_search:
 
     try:
         with st.spinner("Searching..."):
-            results = search_studyid(studyid, spreadsheet_id, api_key)
+            results = search_studyid(studyid)
 
         if results.empty:
-            st.info(
-                f"StudyID {studyid} is not in 'boxNumber' tab or has no BoxNumber. Nothing to display."
-            )
+            st.info(f"StudyID {studyid} is not in 'boxNumber' tab (or no BoxNumber). Nothing to display.")
         else:
             st.success(f"Found {len(results)} record(s).")
             st.dataframe(results, use_container_width=True, hide_index=True)
 
+    except HttpError as e:
+        st.error("Google Sheets API error")
+        st.code(str(e), language="text")
     except Exception as e:
         st.error("Unexpected error")
         st.code(str(e), language="text")
