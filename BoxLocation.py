@@ -10,8 +10,8 @@
 # ✅ LN3 Liquid Nitrogen Tank (tab "LN3"):
 #   - Add record fields:
 #       RackNumber: dropdown 1..6
-#       BoxNumber: code = (HP/HN)-(COC/CAN/POL)
-#       BoxUID: auto = LN3-R{rack:02d}-{HP/HN}-{COC/CAN/POL}-{01..99}
+#       BoxNumber: code = (HP/HN)-(COC/CAN/POL/NON-DRUG)
+#       BoxUID: auto = LN3-R{rack:02d}-{HP/HN}-{COC/CAN/POL/NON-DRUG}-{01..99}
 #       TubeNumber: "TubePrefix TubeInput" (one space)
 #       TubeAmount: user input
 #       Memo: user input
@@ -287,7 +287,7 @@ with st.form("ln3_add", clear_on_submit=True):
     with c1:
         hiv_status = st.selectbox("HIV Status", ["HIV+", "HIV-"], index=0)
     with c2:
-        drug_group = st.selectbox("Drug Group", ["Cocaine", "Cannabis", "Poly"], index=0)
+        drug_group = st.selectbox("Drug Group", ["Cocaine", "Cannabis", "Poly","NON-DRUG"], index=0)
 
     hp_hn = HIV_CODE[hiv_status]
     drug_code = DRUG_CODE[drug_group]
