@@ -17,7 +17,7 @@
 #       Memo: user input
 #       BoxID: user input (optional column; included in final report if present)
 #       QRCodeLink: auto-generated (QuickChart PNG URL) and written to sheet
-#   - Search by BoxNumber: shows all matching rows (incl TubeAmount, BoxUID, QRCodeLink)
+#   - Search by BoxNumber: shows all matching rows
 #   - QR download button is OUTSIDE st.form() (Streamlit requirement)
 #
 # ✅ Log Usage (subtract from TubeAmount) + Final Report (append records)
@@ -25,6 +25,7 @@
 #   - Final report: HIDE TubeAmount, show Use instead
 #   - Each usage submit appends a record to final report:
 #       RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
+#   - If TubeAmount becomes 0 after usage: DELETE the LN3 row.
 #   - Download buttons are OUTSIDE st.form() (Streamlit requirement)
 #
 # IMPORTANT:
@@ -72,8 +73,6 @@ DRUG_CODE = {
     "Poly": "POL",
     "NON-DRUG": "NON-DRUG",
 }
-
-BOXUID_RE = re.compile(r"^LN3-R\d{2}-(HP|HN)-(COC|CAN|POL|NON-DRUG)-\d{2}$")
 
 QR_PX = 118
 SPREADSHEET_ID = st.secrets["connections"]["gsheets"]["spreadsheet"]
@@ -142,13 +141,20 @@ def build_box_map() -> dict:
             m[sid] = bx
     return m
 
+def get_sheet_id(service, sheet_title: str) -> int:
+    meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    for s in meta.get("sheets", []):
+        props = s.get("properties", {})
+        if props.get("title") == sheet_title:
+            return int(props.get("sheetId"))
+    raise ValueError(f"Could not find sheetId for tab: {sheet_title}")
+
 def ensure_ln3_header(service):
     """
-    If LN3 header row is blank, write expected header.
+    If LN3 header row is blank, write recommended header.
     If LN3 exists but missing required columns, show warning (do not auto-shift existing columns).
     """
-    expected_required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
-    expected_optional = ["BoxID"]  # optional column, but recommended
+    required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
 
     resp = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
@@ -160,7 +166,6 @@ def ensure_ln3_header(service):
     row1 = [safe_strip(x) for x in row1]
 
     if (not row1) or all(x == "" for x in row1):
-        # Create header with BoxID included (recommended)
         header = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
         service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID,
@@ -170,17 +175,15 @@ def ensure_ln3_header(service):
         ).execute()
         return
 
-    missing_required = [c for c in expected_required if c not in row1]
+    missing_required = [c for c in required if c not in row1]
     if missing_required:
         st.warning(
             "LN3 header exists but missing REQUIRED columns: "
             + ", ".join(missing_required)
             + ". Please add them to row 1 (header) to prevent data misalignment."
         )
-
-    missing_optional = [c for c in expected_optional if c not in row1]
-    if missing_optional:
-        st.info("LN3 header does not include optional column(s): " + ", ".join(missing_optional) + ".")
+    if "BoxID" not in row1:
+        st.info("LN3 header does not include optional column: BoxID (final report will show blank BoxID).")
 
 def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: str) -> str:
     """
@@ -213,37 +216,6 @@ def fetch_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url) as resp:
         return resp.read()
 
-def append_ln3_row(service, row_values: list):
-    """
-    Append a row matching the LN3 sheet header order.
-    We will map values to the CURRENT header so column order never breaks.
-    """
-    header = get_ln3_header(service)
-    if not header or all(h == "" for h in header):
-        raise ValueError("LN3 header row is empty. Add header row first.")
-
-    # Build dict from our app fields
-    data = {
-        "RackNumber": row_values[0],
-        "BoxNumber": row_values[1],
-        "BoxUID": row_values[2],
-        "TubeNumber": row_values[3],
-        "TubeAmount": row_values[4],
-        "Memo": row_values[5],
-        "BoxID": row_values[6] if len(row_values) > 6 else "",
-        "QRCodeLink": row_values[7] if len(row_values) > 7 else "",
-    }
-
-    # Align to sheet header
-    aligned = [data.get(col, "") for col in header if col != ""]
-    service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{LN3_TAB}'!A:Z",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [aligned]},
-    ).execute()
-
 def col_to_a1(col_idx_0based: int) -> str:
     n = col_idx_0based + 1
     s = ""
@@ -261,6 +233,22 @@ def get_ln3_header(service) -> list:
     row1 = (resp.get("values", [[]]) or [[]])[0]
     return [safe_strip(x) for x in row1 if safe_strip(x) != ""]
 
+def append_ln3_row(service, data: dict):
+    """
+    Append one LN3 row by mapping our dict to current sheet header (prevents column order bugs).
+    """
+    header = get_ln3_header(service)
+    if not header:
+        raise ValueError("LN3 header row is empty. Add header row first.")
+    aligned = [data.get(col, "") for col in header]
+    service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{LN3_TAB}'!A:Z",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [aligned]},
+    ).execute()
+
 def to_int_amount(x, default=0) -> int:
     try:
         s = safe_strip(x)
@@ -272,13 +260,12 @@ def to_int_amount(x, default=0) -> int:
 
 def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, box_uid: str = ""):
     """
-    Find matching DataFrame index (0-based) for a row to update.
+    Find matching DataFrame index (0-based, excluding header) for a row to update.
     Matches BoxNumber + TubeNumber; if box_uid provided, also match BoxUID.
     Returns (idx0, current_amount_int) or (None, None).
     """
     if ln3_df is None or ln3_df.empty:
         return None, None
-
     for col in ["BoxNumber", "TubeNumber", "TubeAmount"]:
         if col not in ln3_df.columns:
             return None, None
@@ -302,6 +289,10 @@ def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, 
     return idx0, cur_amount
 
 def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
+    """
+    Update TubeAmount cell for a given DataFrame index (0-based, excluding header).
+    Sheet row = idx0 + 2 (header row is 1).
+    """
     header = get_ln3_header(service)
     if "TubeAmount" not in header:
         raise ValueError("LN3 sheet header missing 'TubeAmount' column.")
@@ -317,21 +308,46 @@ def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
         body={"values": [[int(new_amount)]]},
     ).execute()
 
-def build_usage_report_row(updated_row: pd.Series, use_amt: int) -> dict:
+def delete_ln3_row_by_index(service, idx0: int):
+    """
+    Delete a row from LN3.
+    idx0 = pandas index (0-based, excluding header).
+    In Google Sheets, rows are 0-based including header, so:
+      header is rowIndex 0
+      first data row is rowIndex 1
+    We want to delete (idx0 + 1).
+    """
+    sheet_id = get_sheet_id(service, LN3_TAB)
+    start = idx0 + 1
+    requests = [{
+        "deleteDimension": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "ROWS",
+                "startIndex": start,
+                "endIndex": start + 1
+            }
+        }
+    }]
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests}
+    ).execute()
+
+def build_usage_report_row(row: pd.Series, use_amt: int) -> dict:
     """
     Final report columns:
     RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
-    TubeAmount is intentionally not included.
-    BoxID is OPTIONAL and handled safely.
+    TubeAmount intentionally not included.
+    BoxID optional.
     """
-    boxid = safe_strip(updated_row["BoxID"]) if "BoxID" in updated_row.index else ""
     return {
-        "RackNumber": safe_strip(updated_row.get("RackNumber", "")),
-        "BoxNumber":  safe_strip(updated_row.get("BoxNumber", "")),
-        "BoxUID":     safe_strip(updated_row.get("BoxUID", "")),
-        "TubeNumber": safe_strip(updated_row.get("TubeNumber", "")),
-        "Memo":       safe_strip(updated_row.get("Memo", "")),
-        "BoxID":      boxid,
+        "RackNumber": safe_strip(row.get("RackNumber", "")),
+        "BoxNumber":  safe_strip(row.get("BoxNumber", "")),
+        "BoxUID":     safe_strip(row.get("BoxUID", "")),
+        "TubeNumber": safe_strip(row.get("TubeNumber", "")),
+        "Memo":       safe_strip(row.get("Memo", "")),
+        "BoxID":      safe_strip(row.get("BoxID", "")) if "BoxID" in row.index else "",
         "Use":        int(use_amt),
     }
 
@@ -427,7 +443,6 @@ with st.form("ln3_add", clear_on_submit=True):
     memo = st.text_area("Memo (optional)")
     boxid_input = st.text_input("BoxID (optional)", placeholder="e.g., 9")
 
-    # Preview BoxUID & QR
     preview_uid, preview_qr, preview_err = "", "", ""
     try:
         preview_uid = compute_next_boxuid(ln3_df, rack, hp_hn, drug_code)
@@ -456,18 +471,17 @@ with st.form("ln3_add", clear_on_submit=True):
             box_uid = compute_next_boxuid(ln3_df, rack, hp_hn, drug_code)
             qr_link = qr_link_for_boxuid(box_uid)
 
-            # NOTE: append_ln3_row maps to actual sheet header
-            row_values = [
-                int(rack),
-                box_number,
-                box_uid,
-                tube_number,
-                int(tube_amount),
-                memo,
-                boxid_input,
-                qr_link,
-            ]
-            append_ln3_row(service, row_values)
+            data = {
+                "RackNumber": int(rack),
+                "BoxNumber": box_number,
+                "BoxUID": box_uid,
+                "TubeNumber": tube_number,
+                "TubeAmount": int(tube_amount),
+                "Memo": memo,
+                "BoxID": boxid_input,
+                "QRCodeLink": qr_link,
+            }
+            append_ln3_row(service, data)
             st.success(f"Saved ✅ {box_uid}")
 
             ln3_df = read_tab(LN3_TAB)
@@ -516,7 +530,7 @@ else:
 # ============================================================
 # 3) LOG USAGE + FINAL REPORT (SHOW TubeAmount in current, HIDE in final)
 # ============================================================
-st.subheader("📉 Log Usage (subtract from TubeAmount, append final report)")
+st.subheader("📉 Log Usage (subtract from TubeAmount, delete row if 0, append final report)")
 
 if ln3_df is None or ln3_df.empty:
     st.info("LN3 is empty — nothing to log.")
@@ -525,7 +539,6 @@ else:
     if not needed.issubset(set(ln3_df.columns)):
         st.warning("LN3 sheet must include columns: BoxNumber, TubeNumber, TubeAmount.")
     else:
-        # Choose BoxNumber
         box_opts = sorted([safe_strip(x) for x in ln3_df["BoxNumber"].dropna().astype(str).tolist() if safe_strip(x)])
         chosen_box = st.selectbox("Select BoxNumber", ["(select)"] + sorted(set(box_opts)), key="use_box")
 
@@ -541,7 +554,6 @@ else:
             tube_opts = sorted([safe_strip(x) for x in sub["TubeNumber"].dropna().astype(str).tolist() if safe_strip(x)])
             chosen_tube = st.selectbox("Select TubeNumber", ["(select)"] + sorted(set(tube_opts)), key="use_tube")
 
-            # If duplicates exist, choose BoxUID
             if chosen_tube != "(select)" and "BoxUID" in sub.columns:
                 sub2 = sub[sub["TubeNumber"] == safe_strip(chosen_tube)].copy()
                 if len(sub2) > 1:
@@ -555,7 +567,6 @@ else:
                     if chosen_uid == "(select)":
                         chosen_uid = ""
 
-            # Current matching record(s): SHOW TubeAmount
             if chosen_tube != "(select)":
                 show = sub[sub["TubeNumber"] == safe_strip(chosen_tube)].copy()
                 if chosen_uid and "BoxUID" in show.columns:
@@ -565,7 +576,6 @@ else:
                 st.markdown("**Current matching record(s):**")
                 st.dataframe(show, use_container_width=True, hide_index=True)
 
-        # -------- FORM (no download inside) --------
         with st.form("ln3_use_form"):
             use_amt = st.number_input("Use", min_value=0, step=1, value=1)
             submitted_use = st.form_submit_button("Submit Usage", type="primary")
@@ -594,26 +604,25 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount = {cur_amount}, Use = {int(use_amt)}")
                         st.stop()
 
-                    update_ln3_tubeamount_by_index(service=service, idx0=idx0, new_amount=new_amount)
-                    st.success(f"Usage logged ✅ Used {int(use_amt)}")
+                    # Capture the row (pre-change) for reporting (includes Memo/BoxID etc)
+                    row_before = ln3_df.iloc[idx0].copy()
 
-                    # Reload LN3, match updated row(s)
+                    if new_amount == 0:
+                        delete_ln3_row_by_index(service, idx0)
+                        st.success("Usage logged ✅ TubeAmount reached 0 — row deleted.")
+                    else:
+                        update_ln3_tubeamount_by_index(service, idx0=idx0, new_amount=new_amount)
+                        st.success(f"Usage logged ✅ Used {int(use_amt)} (remaining: {new_amount})")
+
+                    # Append usage record to FINAL REPORT (TubeAmount hidden)
+                    st.session_state.usage_final_rows.append(build_usage_report_row(row_before, int(use_amt)))
+
+                    # Reload LN3 after update/delete
                     ln3_df = read_tab(LN3_TAB)
 
-                    rep = ln3_df.copy()
-                    rep["BoxNumber"] = rep["BoxNumber"].astype(str).map(safe_strip)
-                    rep["TubeNumber"] = rep["TubeNumber"].astype(str).map(safe_strip)
-                    mask = (rep["BoxNumber"] == safe_strip(chosen_box)) & (rep["TubeNumber"] == safe_strip(chosen_tube))
-                    if chosen_uid and "BoxUID" in rep.columns:
-                        rep["BoxUID"] = rep["BoxUID"].astype(str).map(safe_strip)
-                        mask = mask & (rep["BoxUID"] == safe_strip(chosen_uid))
-
-                    updated_row_df = ln3_df[mask].copy()
-                    if updated_row_df.empty:
-                        st.warning("Updated, but could not find the updated row after refresh.")
-                    else:
-                        for _, r in updated_row_df.iterrows():
-                            st.session_state.usage_final_rows.append(build_usage_report_row(r, int(use_amt)))
+                    # Rerun recommended after deleting a row (row indices shift)
+                    if new_amount == 0:
+                        st.rerun()
 
                 except HttpError as e:
                     st.error("Google Sheets API error while logging usage.")
@@ -627,10 +636,7 @@ else:
         final_cols = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "Memo", "BoxID", "Use"]
 
         if st.session_state.usage_final_rows:
-            final_df = pd.DataFrame(st.session_state.usage_final_rows)
-            # Force column order and create missing columns (including BoxID) safely
-            final_df = final_df.reindex(columns=final_cols, fill_value="")
-
+            final_df = pd.DataFrame(st.session_state.usage_final_rows).reindex(columns=final_cols, fill_value="")
             st.dataframe(final_df, use_container_width=True, hide_index=True)
 
             csv_bytes = final_df.to_csv(index=False).encode("utf-8")
