@@ -559,11 +559,15 @@ else:
                     show["BoxUID"] = show["BoxUID"].astype(str).map(safe_strip)
                     show = show[show["BoxUID"] == safe_strip(chosen_uid)].copy()
 
-                show_ui = show.copy()
-                if "TubeAmount" in show_ui.columns:
-                    show_ui = show_ui.drop(columns=["TubeAmount"])
-                st.markdown("**Current matching record(s):** (TubeAmount hidden)")
-                st.dataframe(show_ui, use_container_width=True, hide_index=True)
+                # show_ui = show.copy()
+                # if "TubeAmount" in show_ui.columns:
+                #     show_ui = show_ui.drop(columns=["TubeAmount"])
+                # st.markdown("**Current matching record(s):** (TubeAmount hidden)")
+                # st.dataframe(show_ui, use_container_width=True, hide_index=True)
+        
+        st.markdown("**Current matching record(s):**")
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
 
         # -------- FORM (no download button inside) --------
         with st.form("ln3_use_form"):
