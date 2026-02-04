@@ -57,8 +57,12 @@ LN3_TAB = "LN3"
 
 # Codes for BoxNumber + BoxUID
 HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}
-DRUG_CODE = {"Cocaine": "COC", "Cannabis": "CAN", "Poly": "POL"}
-
+DRUG_CODE = {
+    "Cocaine": "COC",
+    "Cannabis": "CAN",
+    "Poly": "POL",
+    "NON-DRUG": "NON-DRUG",   # ✅ FIXED: prevents KeyError
+}
 BOXUID_RE = re.compile(r"^LN3-R\d{2}-(HP|HN)-(COC|CAN|POL)-\d{2}$")
 
 # 1 cm ~ 118 px at 300 DPI (approx). You can increase to 236 for higher DPI labels.
