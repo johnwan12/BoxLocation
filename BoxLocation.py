@@ -26,7 +26,9 @@
 #   - Each usage submit appends a record to final report:
 #       RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
 #   - If TubeAmount becomes 0 after usage: DELETE the LN3 row.
-#   - Download buttons are OUTSIDE st.form() (Streamlit requirement)
+#
+# ✅ Auto-clean on load:
+#   - After loading LN3 from Google Sheets, if any row has TubeAmount == 0, delete that row.
 #
 # IMPORTANT:
 #   - Recommended LN3 header row:
@@ -312,10 +314,10 @@ def delete_ln3_row_by_index(service, idx0: int):
     """
     Delete a row from LN3.
     idx0 = pandas index (0-based, excluding header).
-    In Google Sheets, rows are 0-based including header, so:
-      header is rowIndex 0
-      first data row is rowIndex 1
-    We want to delete (idx0 + 1).
+    In Google Sheets, row indices are 0-based including header:
+      header row is 0
+      first data row is 1
+    So delete (idx0 + 1).
     """
     sheet_id = get_sheet_id(service, LN3_TAB)
     start = idx0 + 1
@@ -333,6 +335,45 @@ def delete_ln3_row_by_index(service, idx0: int):
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": requests}
     ).execute()
+
+def cleanup_zero_tubeamount_rows(service, ln3_df: pd.DataFrame) -> bool:
+    """
+    After loading LN3, remove any rows where TubeAmount == 0.
+    Deletes bottom->top in a single batchUpdate to avoid row-shift bugs.
+    Returns True if any rows were deleted.
+    """
+    if ln3_df is None or ln3_df.empty:
+        return False
+    if "TubeAmount" not in ln3_df.columns:
+        return False
+
+    amounts = pd.to_numeric(ln3_df["TubeAmount"], errors="coerce").fillna(0).astype(int)
+    zero_idxs = [int(i) for i in ln3_df.index[amounts == 0].tolist()]
+    if not zero_idxs:
+        return False
+
+    sheet_id = get_sheet_id(service, LN3_TAB)
+    zero_idxs.sort(reverse=True)
+
+    requests = []
+    for idx0 in zero_idxs:
+        requests.append({
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": idx0 + 1,
+                    "endIndex": idx0 + 2
+                }
+            }
+        })
+
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests}
+    ).execute()
+
+    return True
 
 def build_usage_report_row(row: pd.Series, use_amt: int) -> dict:
     """
@@ -407,10 +448,19 @@ st.header("🧊 LN3 Liquid Nitrogen Tank")
 service = sheets_service()
 ensure_ln3_header(service)
 
+# --- Load LN3, then auto-clean TubeAmount==0 rows ---
 try:
     ln3_df = read_tab(LN3_TAB)
 except Exception:
     ln3_df = pd.DataFrame()
+
+try:
+    removed = cleanup_zero_tubeamount_rows(service, ln3_df)
+    if removed:
+        st.info("🧹 Removed LN3 row(s) where TubeAmount was 0.")
+        ln3_df = read_tab(LN3_TAB)
+except Exception as e:
+    st.warning(f"Zero-row cleanup failed: {e}")
 
 # ---------- Add New LN3 Record ----------
 st.subheader("➕ Add LN3 Record")
@@ -528,7 +578,7 @@ else:
     st.info("No BoxNumber data available yet (LN3 empty or missing BoxNumber column).")
 
 # ============================================================
-# 3) LOG USAGE + FINAL REPORT (SHOW TubeAmount in current, HIDE in final)
+# 3) LOG USAGE + FINAL REPORT
 # ============================================================
 st.subheader("📉 Log Usage (subtract from TubeAmount, delete row if 0, append final report)")
 
@@ -604,7 +654,7 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount = {cur_amount}, Use = {int(use_amt)}")
                         st.stop()
 
-                    # Capture the row (pre-change) for reporting (includes Memo/BoxID etc)
+                    # Capture the row for reporting (TubeAmount hidden in report)
                     row_before = ln3_df.iloc[idx0].copy()
 
                     if new_amount == 0:
@@ -620,7 +670,6 @@ else:
                     # Reload LN3 after update/delete
                     ln3_df = read_tab(LN3_TAB)
 
-                    # Rerun recommended after deleting a row (row indices shift)
                     if new_amount == 0:
                         st.rerun()
 
@@ -653,3 +702,4 @@ else:
                 st.success("Final report cleared.")
         else:
             st.info("No usage records yet. Submit usage to build the final report.")
+
