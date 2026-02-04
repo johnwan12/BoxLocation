@@ -1,29 +1,11 @@
-# BoxLocation.py
-# Complete Streamlit app (Box Location + LN3 Liquid Nitrogen Tank + Use_log)
+# BoxLocation.py — Full Streamlit App
+# Box Location + LN3 inventory + Use_log
 #
-# ✅ NEW: Use_log tab (Google Sheet tab name: "Use_log")
-#   Columns:
-#   'RackNumber', 'BoxNumber', 'BoxUID', 'BoxID', 'TubeNumber', 'Use',
-#   'User', 'Time_stamp', 'ShippingTo', 'Memo'
-#
-# ✅ BoxID rule (Add LN3 Record):
-#   - Find max numeric BoxID from current LN3
-#   - Two options:
-#       1) Using previous box  -> prompt user to enter the max number (BoxID)
-#       2) Open a new box      -> auto assign (max + 1)
-#   - After saving, if "Open a new box" was selected, show a GREEN reminder:
-#       "Please mark the box using the updated BoxID. Hint: BoxID = {BoxID}"
-#
-# ✅ On load:
-#   - ensure LN3 header + ensure Use_log header
-#   - auto-delete LN3 rows where TubeAmount==0
-#
-# ✅ Log usage:
-#   - Show current matching record(s) including TubeAmount
-#   - On submit, ask for initials (User) and ShippingTo
-#   - Save to Use_log with timestamp format: h:mm:ss mm/dd/yyyy (America/New_York)
-#   - Update LN3 TubeAmount (or delete row if reaches 0)
-#   - Also append to on-screen session report (TubeAmount hidden)
+# Change implemented:
+# ✅ BoxID is NOT editable.
+#   - "Using previous box" => BoxID auto = current max BoxID in LN3 (disabled field)
+#   - "Open a new box"     => BoxID auto = max + 1 (disabled field)
+#   - If "Open a new box" and saved => green reminder "Hint: BoxID = X"
 
 import re
 import urllib.parse
@@ -47,7 +29,7 @@ if "last_qr_link" not in st.session_state:
 if "last_qr_uid" not in st.session_state:
     st.session_state.last_qr_uid = ""
 if "usage_final_rows" not in st.session_state:
-    st.session_state.usage_final_rows = []  # on-screen final report (session)
+    st.session_state.usage_final_rows = []  # session report
 
 # -------------------- Constants --------------------
 DISPLAY_TABS = ["Cocaine", "Cannabis", "HIV-neg-nondrug", "HIV+nondrug"]
@@ -62,25 +44,17 @@ LN3_TAB = "LN3"
 USE_LOG_TAB = "Use_log"
 
 HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}
-DRUG_CODE = {
-    "Cocaine": "COC",
-    "Cannabis": "CAN",
-    "Poly": "POL",
-    "NON-DRUG": "NON-DRUG",
-}
+DRUG_CODE = {"Cocaine": "COC", "Cannabis": "CAN", "Poly": "POL", "NON-DRUG": "NON-DRUG"}
 
 QR_PX = 118
 SPREADSHEET_ID = st.secrets["connections"]["gsheets"]["spreadsheet"]
 NY_TZ = pytz.timezone("America/New_York")
 
-# -------------------- Google Sheets service (READ + WRITE) --------------------
+# -------------------- Google Sheets service --------------------
 @st.cache_resource(show_spinner=False)
 def sheets_service():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(
-        dict(st.secrets["google_service_account"]),
-        scopes=scopes,
-    )
+    creds = Credentials.from_service_account_info(dict(st.secrets["google_service_account"]), scopes=scopes)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 # -------------------- Helpers --------------------
@@ -88,7 +62,6 @@ def safe_strip(x):
     return "" if x is None else str(x).strip()
 
 def read_tab(tab_name: str) -> pd.DataFrame:
-    """Read whole tab into DataFrame; row 1 is header."""
     svc = sheets_service()
     resp = svc.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
@@ -116,7 +89,6 @@ def read_tab(tab_name: str) -> pd.DataFrame:
     return pd.DataFrame(fixed, columns=header)
 
 def build_box_map() -> dict:
-    """StudyID -> BoxNumber map from boxNumber tab."""
     df = read_tab(BOX_TAB)
     if df.empty:
         return {}
@@ -171,49 +143,27 @@ def set_header_if_blank(service, tab: str, header: list):
         ).execute()
 
 def ensure_ln3_header(service):
-    """
-    If LN3 header row is blank, write recommended header.
-    If LN3 exists but missing required columns, show warning.
-    """
     required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
     recommended = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
-
     set_header_if_blank(service, LN3_TAB, recommended)
 
     row1 = get_header(service, LN3_TAB)
     missing_required = [c for c in required if c not in row1]
     if missing_required:
-        st.warning(
-            "LN3 header exists but missing REQUIRED columns: "
-            + ", ".join(missing_required)
-            + ". Please add them to row 1 (header) to prevent data misalignment."
-        )
+        st.warning("LN3 header missing REQUIRED columns: " + ", ".join(missing_required))
     if "BoxID" not in row1:
-        st.info("LN3 header does not include optional column: BoxID (Use_log will store blank BoxID).")
+        st.info("LN3 has no BoxID column (Use_log BoxID will be blank).")
 
 def ensure_use_log_header(service):
-    """
-    Ensure Use_log tab has the required header.
-    If header row is blank, create it.
-    If exists but missing required columns, warn.
-    """
     expected = ["RackNumber", "BoxNumber", "BoxUID", "BoxID", "TubeNumber", "Use", "User", "Time_stamp", "ShippingTo", "Memo"]
     set_header_if_blank(service, USE_LOG_TAB, expected)
 
     row1 = get_header(service, USE_LOG_TAB)
     missing = [c for c in expected if c not in row1]
     if missing:
-        st.warning(
-            "Use_log header exists but missing columns: "
-            + ", ".join(missing)
-            + ". Please add them to row 1 (header) to prevent data misalignment."
-        )
+        st.warning("Use_log header missing columns: " + ", ".join(missing))
 
 def get_current_max_boxid(ln3_df: pd.DataFrame) -> int:
-    """
-    Find max numeric BoxID from LN3. Ignores blanks/non-numeric.
-    Returns 0 if none found.
-    """
     if ln3_df is None or ln3_df.empty or "BoxID" not in ln3_df.columns:
         return 0
     s = pd.to_numeric(ln3_df["BoxID"], errors="coerce").dropna()
@@ -247,13 +197,9 @@ def fetch_bytes(url: str) -> bytes:
         return resp.read()
 
 def append_row_by_header(service, tab: str, data: dict):
-    """
-    Append one row by mapping data dict to the CURRENT sheet header for that tab.
-    Prevents column-order bugs.
-    """
     header = get_header(service, tab)
     if not header:
-        raise ValueError(f"{tab} header row is empty. Add header row first.")
+        raise ValueError(f"{tab} header row is empty.")
     aligned = [data.get(col, "") for col in header]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
@@ -307,12 +253,10 @@ def col_to_a1(col_idx_0based: int) -> str:
 def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
     header = get_header(service, LN3_TAB)
     if "TubeAmount" not in header:
-        raise ValueError("LN3 sheet header missing 'TubeAmount' column.")
-
+        raise ValueError("LN3 missing 'TubeAmount' column.")
     col_idx = header.index("TubeAmount")
     a1_col = col_to_a1(col_idx)
-    sheet_row = idx0 + 2  # header row is 1
-
+    sheet_row = idx0 + 2
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{LN3_TAB}'!{a1_col}{sheet_row}",
@@ -321,41 +265,27 @@ def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
     ).execute()
 
 def delete_ln3_row_by_index(service, idx0: int):
-    """
-    Delete LN3 row by DataFrame index (0-based excluding header).
-    In Sheets (0-based including header): delete rowIndex (idx0 + 1).
-    """
     sheet_id = get_sheet_id(service, LN3_TAB)
     start = idx0 + 1
     service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={
-            "requests": [
-                {
-                    "deleteDimension": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "ROWS",
-                            "startIndex": start,
-                            "endIndex": start + 1,
-                        }
+            "requests": [{
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": start,
+                        "endIndex": start + 1,
                     }
                 }
-            ]
+            }]
         },
     ).execute()
 
 def cleanup_zero_tubeamount_rows(service, ln3_df: pd.DataFrame) -> bool:
-    """
-    After loading LN3, remove any rows where TubeAmount == 0.
-    Deletes bottom->top in a single batchUpdate to avoid row-shift bugs.
-    Returns True if any rows were deleted.
-    """
-    if ln3_df is None or ln3_df.empty:
+    if ln3_df is None or ln3_df.empty or "TubeAmount" not in ln3_df.columns:
         return False
-    if "TubeAmount" not in ln3_df.columns:
-        return False
-
     amounts = pd.to_numeric(ln3_df["TubeAmount"], errors="coerce").fillna(0).astype(int)
     zero_idxs = [int(i) for i in ln3_df.index[amounts == 0].tolist()]
     if not zero_idxs:
@@ -363,31 +293,21 @@ def cleanup_zero_tubeamount_rows(service, ln3_df: pd.DataFrame) -> bool:
 
     sheet_id = get_sheet_id(service, LN3_TAB)
     zero_idxs.sort(reverse=True)
-
-    requests = []
-    for idx0 in zero_idxs:
-        requests.append(
-            {
-                "deleteDimension": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "startIndex": idx0 + 1,
-                        "endIndex": idx0 + 2,
-                    }
-                }
+    requests = [{
+        "deleteDimension": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "ROWS",
+                "startIndex": idx0 + 1,
+                "endIndex": idx0 + 2,
             }
-        )
+        }
+    } for idx0 in zero_idxs]
 
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body={"requests": requests},
-    ).execute()
-
+    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
     return True
 
 def build_final_report_row(row: pd.Series, use_amt: int) -> dict:
-    """On-screen final report row (TubeAmount hidden)."""
     return {
         "RackNumber": safe_strip(row.get("RackNumber", "")),
         "BoxNumber": safe_strip(row.get("BoxNumber", "")),
@@ -399,14 +319,10 @@ def build_final_report_row(row: pd.Series, use_amt: int) -> dict:
     }
 
 def build_use_log_row(row: pd.Series, use_amt: int, user_initials: str, shipping_to: str) -> dict:
-    """Row to append to Use_log."""
     now = datetime.now(NY_TZ)
-
-    # h:mm:ss (no leading zero hour) - cross-platform safe
-    time_str = now.strftime("%I:%M:%S").lstrip("0") or "0" + now.strftime("%I:%M:%S")
-    date_str = now.strftime("%m/%d/%Y")  # mm/dd/yyyy
+    time_str = now.strftime("%I:%M:%S").lstrip("0") or now.strftime("%I:%M:%S")
+    date_str = now.strftime("%m/%d/%Y")
     ts = f"{time_str} {date_str}"
-
     return {
         "RackNumber": safe_strip(row.get("RackNumber", "")),
         "BoxNumber": safe_strip(row.get("BoxNumber", "")),
@@ -421,7 +337,7 @@ def build_use_log_row(row: pd.Series, use_amt: int, user_initials: str, shipping
     }
 
 # ============================================================
-# Sidebar
+# Sidebar (Box Location selector)
 # ============================================================
 with st.sidebar:
     st.subheader("Box Location")
@@ -476,15 +392,14 @@ service = sheets_service()
 ensure_ln3_header(service)
 ensure_use_log_header(service)
 
-# --- Load LN3, then auto-clean TubeAmount==0 rows ---
+# Load LN3 + cleanup TubeAmount==0
 try:
     ln3_df = read_tab(LN3_TAB)
 except Exception:
     ln3_df = pd.DataFrame()
 
 try:
-    removed = cleanup_zero_tubeamount_rows(service, ln3_df)
-    if removed:
+    if cleanup_zero_tubeamount_rows(service, ln3_df):
         st.info("🧹 Removed LN3 row(s) where TubeAmount was 0.")
         ln3_df = read_tab(LN3_TAB)
 except Exception as e:
@@ -492,10 +407,6 @@ except Exception as e:
 
 # ---------- Add New LN3 Record ----------
 st.subheader("➕ Add LN3 Record")
-
-# We need to remember whether the user chose "Open a new box" to show reminder after saving.
-opened_new_box_outside = False
-saved_boxid_outside = ""
 
 with st.form("ln3_add", clear_on_submit=True):
     rack = st.selectbox("RackNumber", [1, 2, 3, 4, 5, 6], index=0)
@@ -514,28 +425,19 @@ with st.form("ln3_add", clear_on_submit=True):
 
     box_number = f"{hp_hn}-{drug_code}"
 
-    # ---- BoxID logic (max from LN3 + option) ----
+    # ----- BoxID (NOT editable) -----
     current_max_boxid = get_current_max_boxid(ln3_df)
     st.caption(f"Current max BoxID in LN3: {current_max_boxid if current_max_boxid else '(none)'}")
 
-    box_choice = st.radio(
-        "BoxID option",
-        ["Using previous box", "Open a new box"],
-        horizontal=True,
-    )
+    box_choice = st.radio("BoxID option", ["Using previous box", "Open a new box"], horizontal=True)
 
-    opened_new_box = False
+    opened_new_box = (box_choice == "Open a new box")
     if box_choice == "Using previous box":
-        boxid_val = st.number_input(
-            "Enter BoxID (max number) for the box you are using",
-            min_value=1,
-            step=1,
-            value=int(current_max_boxid) if current_max_boxid > 0 else 1,
-        )
+        boxid_val = max(current_max_boxid, 1)  # if none, default 1
+        st.text_input("BoxID (locked: current max BoxID)", value=str(boxid_val), disabled=True)
     else:
-        opened_new_box = True
-        boxid_val = int(current_max_boxid) + 1 if current_max_boxid >= 0 else 1
-        st.text_input("BoxID (auto: max + 1)", value=str(boxid_val), disabled=True)
+        boxid_val = (current_max_boxid + 1) if current_max_boxid >= 0 else 1
+        st.text_input("BoxID (locked: max + 1)", value=str(boxid_val), disabled=True)
 
     boxid_input = str(int(boxid_val))
 
@@ -549,6 +451,7 @@ with st.form("ln3_add", clear_on_submit=True):
     tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
     memo = st.text_area("Memo (optional)")
 
+    # Preview UID/QR
     preview_uid, preview_qr, preview_err = "", "", ""
     try:
         preview_uid = compute_next_boxuid(ln3_df, rack, hp_hn, drug_code)
@@ -590,28 +493,21 @@ with st.form("ln3_add", clear_on_submit=True):
             append_row_by_header(service, LN3_TAB, data)
             st.success(f"Saved ✅ {box_uid}")
 
-            # Save state for outside-form actions
-            st.session_state.last_qr_link = qr_link
-            st.session_state.last_qr_uid = box_uid
-
-            # Show reminder immediately (still safe inside form; no download_button here)
+            # Green reminder only for new box
             if opened_new_box:
                 st.markdown(
                     f"""
-                    <div style="
-                        padding:12px;
-                        border-radius:8px;
-                        background-color:#e8f5e9;
-                        border:1px solid #2e7d32;
-                        font-size:16px;">
-                    ⚠️ <b>Please mark the box using the updated BoxID.</b><br><br>
-                    <span style="color:#2e7d32; font-weight:700; font-size:20px;">
-                    Hint: BoxID = {boxid_input}
-                    </span>
+                    <div style="padding:12px;border-radius:8px;background-color:#e8f5e9;border:1px solid #2e7d32;font-size:16px;">
+                      ⚠️ <b>Please mark the box using the updated BoxID.</b><br><br>
+                      <span style="color:#2e7d32;font-weight:700;font-size:20px;">Hint: BoxID = {boxid_input}</span>
                     </div>
                     """,
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
+
+            # Save for download (outside form)
+            st.session_state.last_qr_link = qr_link
+            st.session_state.last_qr_uid = box_uid
 
             # Refresh LN3
             ln3_df = read_tab(LN3_TAB)
@@ -656,7 +552,7 @@ else:
     st.info("No BoxNumber data available yet (LN3 empty or missing BoxNumber column).")
 
 # ============================================================
-# 3) LOG USAGE + FINAL REPORT + SAVE TO Use_log
+# 3) LOG USAGE + SAVE TO Use_log
 # ============================================================
 st.subheader("📉 Log Usage (subtract from TubeAmount, delete row if 0, save to Use_log)")
 
@@ -665,7 +561,7 @@ if ln3_df is None or ln3_df.empty:
 else:
     needed = {"BoxNumber", "TubeNumber", "TubeAmount"}
     if not needed.issubset(set(ln3_df.columns)):
-        st.warning("LN3 sheet must include columns: BoxNumber, TubeNumber, TubeAmount.")
+        st.warning("LN3 must include: BoxNumber, TubeNumber, TubeAmount.")
     else:
         box_opts = sorted([safe_strip(x) for x in ln3_df["BoxNumber"].dropna().astype(str).tolist() if safe_strip(x)])
         chosen_box = st.selectbox("Select BoxNumber", ["(select)"] + sorted(set(box_opts)), key="use_box")
@@ -704,12 +600,10 @@ else:
                 st.markdown("**Current matching record(s):**")
                 st.dataframe(show, use_container_width=True, hide_index=True)
 
-        # -------- FORM --------
         with st.form("ln3_use_form"):
             st.markdown("**Required for Use_log**")
             user_initials = st.text_input("Your initials (User)", placeholder="e.g., JW").strip()
             shipping_to = st.text_input("ShippingTo", placeholder="e.g., Dr. Smith / UCSF / Building 3").strip()
-
             st.divider()
             use_amt = st.number_input("Use", min_value=0, step=1, value=1)
 
@@ -742,35 +636,31 @@ else:
 
                     new_amount = cur_amount - int(use_amt)
                     if new_amount < 0:
-                        st.error(f"Not enough stock. Current TubeAmount = {cur_amount}, Use = {int(use_amt)}")
+                        st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
                         st.stop()
 
-                    # Capture the row for logging/reporting BEFORE update/delete
                     row_before = ln3_df.iloc[idx0].copy()
 
-                    # Append to Use_log first (audit trail should exist even if LN3 deletion happens)
-                    use_log_data = build_use_log_row(
-                        row=row_before,
-                        use_amt=int(use_amt),
-                        user_initials=user_initials,
-                        shipping_to=shipping_to,
+                    # Save to Use_log (audit trail)
+                    append_row_by_header(
+                        service,
+                        USE_LOG_TAB,
+                        build_use_log_row(row_before, int(use_amt), user_initials, shipping_to),
                     )
-                    append_row_by_header(service, USE_LOG_TAB, use_log_data)
 
-                    # Update LN3 (or delete if reaches 0)
+                    # Update LN3 / delete if 0
                     if new_amount == 0:
                         delete_ln3_row_by_index(service, idx0)
                         st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN3 row deleted.")
                     else:
-                        update_ln3_tubeamount_by_index(service, idx0=idx0, new_amount=new_amount)
+                        update_ln3_tubeamount_by_index(service, idx0, new_amount)
                         st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
-                    # Append to on-screen session report (TubeAmount hidden)
+                    # Session report
                     st.session_state.usage_final_rows.append(build_final_report_row(row_before, int(use_amt)))
 
-                    # Reload LN3 after update/delete
+                    # Reload LN3
                     ln3_df = read_tab(LN3_TAB)
-
                     if new_amount == 0:
                         st.rerun()
 
@@ -781,8 +671,8 @@ else:
                     st.error("Failed to log usage.")
                     st.code(str(e), language="text")
 
-        # -------- OUTSIDE FORM: FINAL REPORT (session view) --------
-        st.markdown("### ✅ Final Usage Report (session view; saved permanently in Use_log)")
+        # Session report + download (outside form)
+        st.markdown("### ✅ Final Usage Report (session view; permanently saved in Use_log)")
         final_cols = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "Memo", "BoxID", "Use"]
 
         if st.session_state.usage_final_rows:
@@ -791,7 +681,7 @@ else:
 
             csv_bytes = final_df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇️ Download final usage report CSV (session)",
+                "⬇️ Download session report CSV",
                 data=csv_bytes,
                 file_name="LN3_final_usage_report_session.csv",
                 mime="text/csv",
@@ -802,10 +692,10 @@ else:
                 st.session_state.usage_final_rows = []
                 st.success("Session report cleared (Use_log remains saved).")
         else:
-            st.info("No usage records in this session yet. Submit usage to build the session report.")
+            st.info("No usage records in this session yet.")
 
 # ============================================================
-# 4) Use_log viewer (optional convenience)
+# 4) Use_log viewer
 # ============================================================
 st.subheader("🧾 Use_log (saved Final Usage Report)")
 try:
