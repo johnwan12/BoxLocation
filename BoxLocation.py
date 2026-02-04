@@ -356,14 +356,37 @@ with st.sidebar:
         index=0
     )
 
-    # ⭐ NEW — Tank selector
-    TANK_OPTIONS = ["LN1", "LN2", "LN3"]
-
-    selected_tank = st.selectbox(
-        "Select LN Tank",
-        TANK_OPTIONS,
-        index=2   # default LN3
+    # ⭐ Storage Type (VERY recommended — prevents future mess)
+    STORAGE_TYPE = st.radio(
+        "Storage Type",
+        ["LN Tank", "Freezer"],
+        horizontal=True
     )
+
+    # ----- LN Tanks -----
+    if STORAGE_TYPE == "LN Tank":
+
+        TANK_OPTIONS = ["LN1", "LN2", "LN3"]
+
+        selected_tank = st.selectbox(
+            "Select LN Tank",
+            TANK_OPTIONS,
+            index=2
+        )
+
+        selected_freezer = None   # important
+
+    # ----- Freezers -----
+    else:
+
+        FREEZER_OPTIONS = ["Sammy", "Tom", "Jerry"]
+
+        selected_freezer = st.selectbox(
+            "Select Freezer",
+            FREEZER_OPTIONS
+        )
+
+        selected_tank = None   # important
 
     st.caption(f"Spreadsheet: {SPREADSHEET_ID[:10]}...")
 
