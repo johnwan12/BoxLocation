@@ -6,17 +6,24 @@
 #   'RackNumber', 'BoxNumber', 'BoxUID', 'BoxID', 'TubeNumber', 'Use',
 #   'User', 'Time_stamp', 'ShippingTo', 'Memo'
 #
-# Behavior:
-# - On app load: ensure LN3 header (recommended) + ensure Use_log header + auto-delete LN3 rows where TubeAmount==0.
-# - On "Submit Usage":
-#     - user must enter initials (User) and ShippingTo
-#     - time stamp saved as "h:mm:ss mm/dd/yyyy" (America/New_York)
-#     - update LN3 TubeAmount (or delete row if reaches 0)
-#     - append one row to Use_log with required columns
-#     - also append to on-screen Final Usage Report (session)
+# ✅ BoxID rule (Add LN3 Record):
+#   - Find max numeric BoxID from current LN3
+#   - Two options:
+#       1) Using previous box  -> prompt user to enter the max number (BoxID)
+#       2) Open a new box      -> auto assign (max + 1)
+#   - After saving, if "Open a new box" was selected, show a GREEN reminder:
+#       "Please mark the box using the updated BoxID. Hint: BoxID = {BoxID}"
 #
-# NOTE:
-# - st.download_button() is outside st.form() (Streamlit requirement)
+# ✅ On load:
+#   - ensure LN3 header + ensure Use_log header
+#   - auto-delete LN3 rows where TubeAmount==0
+#
+# ✅ Log usage:
+#   - Show current matching record(s) including TubeAmount
+#   - On submit, ask for initials (User) and ShippingTo
+#   - Save to Use_log with timestamp format: h:mm:ss mm/dd/yyyy (America/New_York)
+#   - Update LN3 TubeAmount (or delete row if reaches 0)
+#   - Also append to on-screen session report (TubeAmount hidden)
 
 import re
 import urllib.parse
@@ -202,6 +209,18 @@ def ensure_use_log_header(service):
             + ". Please add them to row 1 (header) to prevent data misalignment."
         )
 
+def get_current_max_boxid(ln3_df: pd.DataFrame) -> int:
+    """
+    Find max numeric BoxID from LN3. Ignores blanks/non-numeric.
+    Returns 0 if none found.
+    """
+    if ln3_df is None or ln3_df.empty or "BoxID" not in ln3_df.columns:
+        return 0
+    s = pd.to_numeric(ln3_df["BoxID"], errors="coerce").dropna()
+    if s.empty:
+        return 0
+    return int(s.max())
+
 def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: str) -> str:
     prefix = f"LN3-R{int(rack):02d}-{hp_hn}-{drug_code}-"
     max_n = 0
@@ -382,8 +401,10 @@ def build_final_report_row(row: pd.Series, use_amt: int) -> dict:
 def build_use_log_row(row: pd.Series, use_amt: int, user_initials: str, shipping_to: str) -> dict:
     """Row to append to Use_log."""
     now = datetime.now(NY_TZ)
-    time_str = now.strftime("%-I:%M:%S")  # h:mm:ss (no leading zero hour) on Linux
-    date_str = now.strftime("%m/%d/%Y")   # mm/dd/yyyy
+
+    # h:mm:ss (no leading zero hour) - cross-platform safe
+    time_str = now.strftime("%I:%M:%S").lstrip("0") or "0" + now.strftime("%I:%M:%S")
+    date_str = now.strftime("%m/%d/%Y")  # mm/dd/yyyy
     ts = f"{time_str} {date_str}"
 
     return {
@@ -472,6 +493,10 @@ except Exception as e:
 # ---------- Add New LN3 Record ----------
 st.subheader("➕ Add LN3 Record")
 
+# We need to remember whether the user chose "Open a new box" to show reminder after saving.
+opened_new_box_outside = False
+saved_boxid_outside = ""
+
 with st.form("ln3_add", clear_on_submit=True):
     rack = st.selectbox("RackNumber", [1, 2, 3, 4, 5, 6], index=0)
 
@@ -489,6 +514,31 @@ with st.form("ln3_add", clear_on_submit=True):
 
     box_number = f"{hp_hn}-{drug_code}"
 
+    # ---- BoxID logic (max from LN3 + option) ----
+    current_max_boxid = get_current_max_boxid(ln3_df)
+    st.caption(f"Current max BoxID in LN3: {current_max_boxid if current_max_boxid else '(none)'}")
+
+    box_choice = st.radio(
+        "BoxID option",
+        ["Using previous box", "Open a new box"],
+        horizontal=True,
+    )
+
+    opened_new_box = False
+    if box_choice == "Using previous box":
+        boxid_val = st.number_input(
+            "Enter BoxID (max number) for the box you are using",
+            min_value=1,
+            step=1,
+            value=int(current_max_boxid) if current_max_boxid > 0 else 1,
+        )
+    else:
+        opened_new_box = True
+        boxid_val = int(current_max_boxid) + 1 if current_max_boxid >= 0 else 1
+        st.text_input("BoxID (auto: max + 1)", value=str(boxid_val), disabled=True)
+
+    boxid_input = str(int(boxid_val))
+
     c3, c4 = st.columns(2)
     with c3:
         tube_prefix = st.selectbox("Tube Prefix", ["GICU", "HCCU"], index=0)
@@ -498,7 +548,6 @@ with st.form("ln3_add", clear_on_submit=True):
     tube_number = f"{tube_prefix} {tube_input}" if tube_input else ""
     tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
     memo = st.text_area("Memo (optional)")
-    boxid_input = st.text_input("BoxID (optional)", placeholder="e.g., 9")
 
     preview_uid, preview_qr, preview_err = "", "", ""
     try:
@@ -541,9 +590,31 @@ with st.form("ln3_add", clear_on_submit=True):
             append_row_by_header(service, LN3_TAB, data)
             st.success(f"Saved ✅ {box_uid}")
 
-            ln3_df = read_tab(LN3_TAB)
+            # Save state for outside-form actions
             st.session_state.last_qr_link = qr_link
             st.session_state.last_qr_uid = box_uid
+
+            # Show reminder immediately (still safe inside form; no download_button here)
+            if opened_new_box:
+                st.markdown(
+                    f"""
+                    <div style="
+                        padding:12px;
+                        border-radius:8px;
+                        background-color:#e8f5e9;
+                        border:1px solid #2e7d32;
+                        font-size:16px;">
+                    ⚠️ <b>Please mark the box using the updated BoxID.</b><br><br>
+                    <span style="color:#2e7d32; font-weight:700; font-size:20px;">
+                    Hint: BoxID = {boxid_input}
+                    </span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # Refresh LN3
+            ln3_df = read_tab(LN3_TAB)
 
         except HttpError as e:
             st.error("Google Sheets API error while writing to LN3.")
@@ -633,7 +704,7 @@ else:
                 st.markdown("**Current matching record(s):**")
                 st.dataframe(show, use_container_width=True, hide_index=True)
 
-        # -------- FORM (no download inside) --------
+        # -------- FORM --------
         with st.form("ln3_use_form"):
             st.markdown("**Required for Use_log**")
             user_initials = st.text_input("Your initials (User)", placeholder="e.g., JW").strip()
@@ -677,7 +748,7 @@ else:
                     # Capture the row for logging/reporting BEFORE update/delete
                     row_before = ln3_df.iloc[idx0].copy()
 
-                    # Write to Use_log (always)
+                    # Append to Use_log first (audit trail should exist even if LN3 deletion happens)
                     use_log_data = build_use_log_row(
                         row=row_before,
                         use_amt=int(use_amt),
@@ -694,13 +765,12 @@ else:
                         update_ln3_tubeamount_by_index(service, idx0=idx0, new_amount=new_amount)
                         st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
-                    # Append to on-screen final report (session)
+                    # Append to on-screen session report (TubeAmount hidden)
                     st.session_state.usage_final_rows.append(build_final_report_row(row_before, int(use_amt)))
 
                     # Reload LN3 after update/delete
                     ln3_df = read_tab(LN3_TAB)
 
-                    # After delete, rerun recommended (row indices shift)
                     if new_amount == 0:
                         st.rerun()
 
@@ -711,7 +781,7 @@ else:
                     st.error("Failed to log usage.")
                     st.code(str(e), language="text")
 
-        # -------- OUTSIDE FORM: FINAL REPORT (TubeAmount hidden) --------
+        # -------- OUTSIDE FORM: FINAL REPORT (session view) --------
         st.markdown("### ✅ Final Usage Report (session view; saved permanently in Use_log)")
         final_cols = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "Memo", "BoxID", "Use"]
 
