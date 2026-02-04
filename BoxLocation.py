@@ -336,13 +336,37 @@ def build_use_log_row(row: pd.Series, use_amt: int, user_initials: str, shipping
         "Memo": safe_strip(row.get("Memo", "")),
     }
 
+# # ============================================================
+# # Sidebar (Box Location selector)
+# # ============================================================
+# with st.sidebar:
+#     st.subheader("Box Location")
+#     selected_display_tab = st.selectbox("Select a tab", DISPLAY_TABS, index=0)
+#     st.caption(f"Spreadsheet: {SPREADSHEET_ID[:10]}...")
+
 # ============================================================
-# Sidebar (Box Location selector)
+# Sidebar (Global Controls)
 # ============================================================
 with st.sidebar:
     st.subheader("Box Location")
-    selected_display_tab = st.selectbox("Select a tab", DISPLAY_TABS, index=0)
+
+    selected_display_tab = st.selectbox(
+        "Select Study",
+        DISPLAY_TABS,
+        index=0
+    )
+
+    # ⭐ NEW — Tank selector
+    TANK_OPTIONS = ["LN1", "LN2", "LN3"]
+
+    selected_tank = st.selectbox(
+        "Select LN Tank",
+        TANK_OPTIONS,
+        index=2   # default LN3
+    )
+
     st.caption(f"Spreadsheet: {SPREADSHEET_ID[:10]}...")
+
 
 # ============================================================
 # 1) BOX LOCATION
