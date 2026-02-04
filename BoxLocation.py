@@ -4,7 +4,7 @@
 # UPDATE (per your request):
 # ✅ Global max BoxID must be computed ONLY from:
 #   - tab 'boxNumber' (column 'BoxNumber' or variants)
-#   - tab 'Freezer_Inventory' (column 'Box Number' or variants)
+#   - tab 'Freezer_Inventory' (column 'BoxNumber' or variants)
 # NOT from cocaine/cannabis/HIV tabs.
 #
 # NEW tab:
