@@ -1,45 +1,30 @@
 # BoxLocation.py
-# Complete Streamlit app (Box Location + LN3 Liquid Nitrogen Tank)
+# Complete Streamlit app (Box Location + LN3 Liquid Nitrogen Tank + Use_log)
 #
-# ✅ Box Location:
-#   - User selects a tab: Cocaine / Cannabis / HIV-neg-nondrug / HIV+nondrug
-#   - Display all data in selected tab
-#   - Select StudyID -> look up BoxNumber in boxNumber tab
-#     - If not found => "Not Found"
+# ✅ NEW: Use_log tab (Google Sheet tab name: "Use_log")
+#   Columns:
+#   'RackNumber', 'BoxNumber', 'BoxUID', 'BoxID', 'TubeNumber', 'Use',
+#   'User', 'Time_stamp', 'ShippingTo', 'Memo'
 #
-# ✅ LN3 Liquid Nitrogen Tank (tab "LN3"):
-#   - Add record fields:
-#       RackNumber: dropdown 1..6
-#       BoxNumber: code = (HP/HN)-(COC/CAN/POL/NON-DRUG)
-#       BoxUID: auto = LN3-R{rack:02d}-{HP/HN}-{COC/CAN/POL/NON-DRUG}-{01..99}
-#       TubeNumber: "TubePrefix TubeInput" (one space)
-#       TubeAmount: user input (stored in sheet)
-#       Memo: user input
-#       BoxID: user input (optional column; included in final report if present)
-#       QRCodeLink: auto-generated (QuickChart PNG URL) and written to sheet
-#   - Search by BoxNumber: shows all matching rows
-#   - QR download button is OUTSIDE st.form() (Streamlit requirement)
+# Behavior:
+# - On app load: ensure LN3 header (recommended) + ensure Use_log header + auto-delete LN3 rows where TubeAmount==0.
+# - On "Submit Usage":
+#     - user must enter initials (User) and ShippingTo
+#     - time stamp saved as "h:mm:ss mm/dd/yyyy" (America/New_York)
+#     - update LN3 TubeAmount (or delete row if reaches 0)
+#     - append one row to Use_log with required columns
+#     - also append to on-screen Final Usage Report (session)
 #
-# ✅ Log Usage (subtract from TubeAmount) + Final Report (append records)
-#   - Current matching record(s): SHOW TubeAmount
-#   - Final report: HIDE TubeAmount, show Use instead
-#   - Each usage submit appends a record to final report:
-#       RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
-#   - If TubeAmount becomes 0 after usage: DELETE the LN3 row.
-#
-# ✅ Auto-clean on load:
-#   - After loading LN3 from Google Sheets, if any row has TubeAmount == 0, delete that row.
-#
-# IMPORTANT:
-#   - Recommended LN3 header row:
-#       RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo | BoxID | QRCodeLink
-#   - If your LN3 sheet does NOT have BoxID, the app still works; BoxID will be blank in report.
+# NOTE:
+# - st.download_button() is outside st.form() (Streamlit requirement)
 
 import re
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
 import pandas as pd
+import pytz
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -55,7 +40,7 @@ if "last_qr_link" not in st.session_state:
 if "last_qr_uid" not in st.session_state:
     st.session_state.last_qr_uid = ""
 if "usage_final_rows" not in st.session_state:
-    st.session_state.usage_final_rows = []  # list of dicts appended per submit
+    st.session_state.usage_final_rows = []  # on-screen final report (session)
 
 # -------------------- Constants --------------------
 DISPLAY_TABS = ["Cocaine", "Cannabis", "HIV-neg-nondrug", "HIV+nondrug"]
@@ -67,6 +52,7 @@ TAB_MAP = {
 }
 BOX_TAB = "boxNumber"
 LN3_TAB = "LN3"
+USE_LOG_TAB = "Use_log"
 
 HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}
 DRUG_CODE = {
@@ -78,6 +64,7 @@ DRUG_CODE = {
 
 QR_PX = 118
 SPREADSHEET_ID = st.secrets["connections"]["gsheets"]["spreadsheet"]
+NY_TZ = pytz.timezone("America/New_York")
 
 # -------------------- Google Sheets service (READ + WRITE) --------------------
 @st.cache_resource(show_spinner=False)
@@ -151,32 +138,42 @@ def get_sheet_id(service, sheet_title: str) -> int:
             return int(props.get("sheetId"))
     raise ValueError(f"Could not find sheetId for tab: {sheet_title}")
 
-def ensure_ln3_header(service):
-    """
-    If LN3 header row is blank, write recommended header.
-    If LN3 exists but missing required columns, show warning (do not auto-shift existing columns).
-    """
-    required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
-
+def get_header(service, tab: str) -> list:
     resp = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"'{LN3_TAB}'!A1:Z1",
+        range=f"'{tab}'!A1:Z1",
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
+    row1 = (resp.get("values", [[]]) or [[]])[0]
+    return [safe_strip(x) for x in row1 if safe_strip(x) != ""]
 
+def set_header_if_blank(service, tab: str, header: list):
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab}'!A1:Z1",
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute()
     row1 = (resp.get("values", [[]]) or [[]])[0]
     row1 = [safe_strip(x) for x in row1]
-
     if (not row1) or all(x == "" for x in row1):
-        header = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
         service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"'{LN3_TAB}'!A1",
+            range=f"'{tab}'!A1",
             valueInputOption="RAW",
             body={"values": [header]},
         ).execute()
-        return
 
+def ensure_ln3_header(service):
+    """
+    If LN3 header row is blank, write recommended header.
+    If LN3 exists but missing required columns, show warning.
+    """
+    required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
+    recommended = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
+
+    set_header_if_blank(service, LN3_TAB, recommended)
+
+    row1 = get_header(service, LN3_TAB)
     missing_required = [c for c in required if c not in row1]
     if missing_required:
         st.warning(
@@ -185,16 +182,29 @@ def ensure_ln3_header(service):
             + ". Please add them to row 1 (header) to prevent data misalignment."
         )
     if "BoxID" not in row1:
-        st.info("LN3 header does not include optional column: BoxID (final report will show blank BoxID).")
+        st.info("LN3 header does not include optional column: BoxID (Use_log will store blank BoxID).")
+
+def ensure_use_log_header(service):
+    """
+    Ensure Use_log tab has the required header.
+    If header row is blank, create it.
+    If exists but missing required columns, warn.
+    """
+    expected = ["RackNumber", "BoxNumber", "BoxUID", "BoxID", "TubeNumber", "Use", "User", "Time_stamp", "ShippingTo", "Memo"]
+    set_header_if_blank(service, USE_LOG_TAB, expected)
+
+    row1 = get_header(service, USE_LOG_TAB)
+    missing = [c for c in expected if c not in row1]
+    if missing:
+        st.warning(
+            "Use_log header exists but missing columns: "
+            + ", ".join(missing)
+            + ". Please add them to row 1 (header) to prevent data misalignment."
+        )
 
 def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: str) -> str:
-    """
-    BoxUID: LN3-R{rack:02d}-{HP/HN}-{COC/CAN/POL/NON-DRUG}-{NN}
-    NN increments within same (rack + HP/HN + drug_code), 01..99
-    """
     prefix = f"LN3-R{int(rack):02d}-{hp_hn}-{drug_code}-"
     max_n = 0
-
     if ln3_df is not None and (not ln3_df.empty) and ("BoxUID" in ln3_df.columns):
         for v in ln3_df["BoxUID"].dropna().astype(str):
             s = v.strip()
@@ -204,7 +214,6 @@ def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: 
                     max_n = max(max_n, n)
                 except ValueError:
                     pass
-
     nxt = max_n + 1
     if nxt > 99:
         raise ValueError(f"BoxUID sequence exceeded 99 for {prefix}**")
@@ -218,34 +227,18 @@ def fetch_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url) as resp:
         return resp.read()
 
-def col_to_a1(col_idx_0based: int) -> str:
-    n = col_idx_0based + 1
-    s = ""
-    while n:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-def get_ln3_header(service) -> list:
-    resp = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{LN3_TAB}'!A1:Z1",
-        valueRenderOption="UNFORMATTED_VALUE",
-    ).execute()
-    row1 = (resp.get("values", [[]]) or [[]])[0]
-    return [safe_strip(x) for x in row1 if safe_strip(x) != ""]
-
-def append_ln3_row(service, data: dict):
+def append_row_by_header(service, tab: str, data: dict):
     """
-    Append one LN3 row by mapping our dict to current sheet header (prevents column order bugs).
+    Append one row by mapping data dict to the CURRENT sheet header for that tab.
+    Prevents column-order bugs.
     """
-    header = get_ln3_header(service)
+    header = get_header(service, tab)
     if not header:
-        raise ValueError("LN3 header row is empty. Add header row first.")
+        raise ValueError(f"{tab} header row is empty. Add header row first.")
     aligned = [data.get(col, "") for col in header]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"'{LN3_TAB}'!A:Z",
+        range=f"'{tab}'!A:Z",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": [aligned]},
@@ -261,11 +254,6 @@ def to_int_amount(x, default=0) -> int:
         return default
 
 def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, box_uid: str = ""):
-    """
-    Find matching DataFrame index (0-based, excluding header) for a row to update.
-    Matches BoxNumber + TubeNumber; if box_uid provided, also match BoxUID.
-    Returns (idx0, current_amount_int) or (None, None).
-    """
     if ln3_df is None or ln3_df.empty:
         return None, None
     for col in ["BoxNumber", "TubeNumber", "TubeAmount"]:
@@ -277,7 +265,6 @@ def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, 
     df["TubeNumber"] = df["TubeNumber"].astype(str).map(safe_strip)
 
     mask = (df["BoxNumber"] == safe_strip(box_number)) & (df["TubeNumber"] == safe_strip(tube_number))
-
     if box_uid and "BoxUID" in df.columns:
         df["BoxUID"] = df["BoxUID"].astype(str).map(safe_strip)
         mask = mask & (df["BoxUID"] == safe_strip(box_uid))
@@ -290,18 +277,22 @@ def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, 
     cur_amount = to_int_amount(hits.iloc[0].get("TubeAmount", 0), default=0)
     return idx0, cur_amount
 
+def col_to_a1(col_idx_0based: int) -> str:
+    n = col_idx_0based + 1
+    s = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
 def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
-    """
-    Update TubeAmount cell for a given DataFrame index (0-based, excluding header).
-    Sheet row = idx0 + 2 (header row is 1).
-    """
-    header = get_ln3_header(service)
+    header = get_header(service, LN3_TAB)
     if "TubeAmount" not in header:
         raise ValueError("LN3 sheet header missing 'TubeAmount' column.")
 
     col_idx = header.index("TubeAmount")
     a1_col = col_to_a1(col_idx)
-    sheet_row = idx0 + 2
+    sheet_row = idx0 + 2  # header row is 1
 
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
@@ -312,28 +303,27 @@ def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
 
 def delete_ln3_row_by_index(service, idx0: int):
     """
-    Delete a row from LN3.
-    idx0 = pandas index (0-based, excluding header).
-    In Google Sheets, row indices are 0-based including header:
-      header row is 0
-      first data row is 1
-    So delete (idx0 + 1).
+    Delete LN3 row by DataFrame index (0-based excluding header).
+    In Sheets (0-based including header): delete rowIndex (idx0 + 1).
     """
     sheet_id = get_sheet_id(service, LN3_TAB)
     start = idx0 + 1
-    requests = [{
-        "deleteDimension": {
-            "range": {
-                "sheetId": sheet_id,
-                "dimension": "ROWS",
-                "startIndex": start,
-                "endIndex": start + 1
-            }
-        }
-    }]
     service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
-        body={"requests": requests}
+        body={
+            "requests": [
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": start,
+                            "endIndex": start + 1,
+                        }
+                    }
+                }
+            ]
+        },
     ).execute()
 
 def cleanup_zero_tubeamount_rows(service, ln3_df: pd.DataFrame) -> bool:
@@ -357,39 +347,56 @@ def cleanup_zero_tubeamount_rows(service, ln3_df: pd.DataFrame) -> bool:
 
     requests = []
     for idx0 in zero_idxs:
-        requests.append({
-            "deleteDimension": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "dimension": "ROWS",
-                    "startIndex": idx0 + 1,
-                    "endIndex": idx0 + 2
+        requests.append(
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": idx0 + 1,
+                        "endIndex": idx0 + 2,
+                    }
                 }
             }
-        })
+        )
 
     service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
-        body={"requests": requests}
+        body={"requests": requests},
     ).execute()
 
     return True
 
-def build_usage_report_row(row: pd.Series, use_amt: int) -> dict:
-    """
-    Final report columns:
-    RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
-    TubeAmount intentionally not included.
-    BoxID optional.
-    """
+def build_final_report_row(row: pd.Series, use_amt: int) -> dict:
+    """On-screen final report row (TubeAmount hidden)."""
     return {
         "RackNumber": safe_strip(row.get("RackNumber", "")),
-        "BoxNumber":  safe_strip(row.get("BoxNumber", "")),
-        "BoxUID":     safe_strip(row.get("BoxUID", "")),
+        "BoxNumber": safe_strip(row.get("BoxNumber", "")),
+        "BoxUID": safe_strip(row.get("BoxUID", "")),
         "TubeNumber": safe_strip(row.get("TubeNumber", "")),
-        "Memo":       safe_strip(row.get("Memo", "")),
-        "BoxID":      safe_strip(row.get("BoxID", "")) if "BoxID" in row.index else "",
-        "Use":        int(use_amt),
+        "Memo": safe_strip(row.get("Memo", "")),
+        "BoxID": safe_strip(row.get("BoxID", "")) if "BoxID" in row.index else "",
+        "Use": int(use_amt),
+    }
+
+def build_use_log_row(row: pd.Series, use_amt: int, user_initials: str, shipping_to: str) -> dict:
+    """Row to append to Use_log."""
+    now = datetime.now(NY_TZ)
+    time_str = now.strftime("%-I:%M:%S")  # h:mm:ss (no leading zero hour) on Linux
+    date_str = now.strftime("%m/%d/%Y")   # mm/dd/yyyy
+    ts = f"{time_str} {date_str}"
+
+    return {
+        "RackNumber": safe_strip(row.get("RackNumber", "")),
+        "BoxNumber": safe_strip(row.get("BoxNumber", "")),
+        "BoxUID": safe_strip(row.get("BoxUID", "")),
+        "BoxID": safe_strip(row.get("BoxID", "")) if "BoxID" in row.index else "",
+        "TubeNumber": safe_strip(row.get("TubeNumber", "")),
+        "Use": int(use_amt),
+        "User": safe_strip(user_initials).upper(),
+        "Time_stamp": ts,
+        "ShippingTo": safe_strip(shipping_to),
+        "Memo": safe_strip(row.get("Memo", "")),
     }
 
 # ============================================================
@@ -408,7 +415,6 @@ tab_name = TAB_MAP[selected_display_tab]
 
 try:
     df = read_tab(tab_name)
-
     if df.empty:
         st.warning(f"No data found in tab: {selected_display_tab}")
     else:
@@ -447,6 +453,7 @@ st.header("🧊 LN3 Liquid Nitrogen Tank")
 
 service = sheets_service()
 ensure_ln3_header(service)
+ensure_use_log_header(service)
 
 # --- Load LN3, then auto-clean TubeAmount==0 rows ---
 try:
@@ -531,7 +538,7 @@ with st.form("ln3_add", clear_on_submit=True):
                 "BoxID": boxid_input,
                 "QRCodeLink": qr_link,
             }
-            append_ln3_row(service, data)
+            append_row_by_header(service, LN3_TAB, data)
             st.success(f"Saved ✅ {box_uid}")
 
             ln3_df = read_tab(LN3_TAB)
@@ -578,9 +585,9 @@ else:
     st.info("No BoxNumber data available yet (LN3 empty or missing BoxNumber column).")
 
 # ============================================================
-# 3) LOG USAGE + FINAL REPORT
+# 3) LOG USAGE + FINAL REPORT + SAVE TO Use_log
 # ============================================================
-st.subheader("📉 Log Usage (subtract from TubeAmount, delete row if 0, append final report)")
+st.subheader("📉 Log Usage (subtract from TubeAmount, delete row if 0, save to Use_log)")
 
 if ln3_df is None or ln3_df.empty:
     st.info("LN3 is empty — nothing to log.")
@@ -626,8 +633,15 @@ else:
                 st.markdown("**Current matching record(s):**")
                 st.dataframe(show, use_container_width=True, hide_index=True)
 
+        # -------- FORM (no download inside) --------
         with st.form("ln3_use_form"):
+            st.markdown("**Required for Use_log**")
+            user_initials = st.text_input("Your initials (User)", placeholder="e.g., JW").strip()
+            shipping_to = st.text_input("ShippingTo", placeholder="e.g., Dr. Smith / UCSF / Building 3").strip()
+
+            st.divider()
             use_amt = st.number_input("Use", min_value=0, step=1, value=1)
+
             submitted_use = st.form_submit_button("Submit Usage", type="primary")
 
             if submitted_use:
@@ -636,6 +650,12 @@ else:
                     st.stop()
                 if use_amt <= 0:
                     st.error("Use must be > 0.")
+                    st.stop()
+                if not user_initials:
+                    st.error("Please enter your initials (User).")
+                    st.stop()
+                if not shipping_to:
+                    st.error("Please enter ShippingTo.")
                     st.stop()
 
                 try:
@@ -654,22 +674,33 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount = {cur_amount}, Use = {int(use_amt)}")
                         st.stop()
 
-                    # Capture the row for reporting (TubeAmount hidden in report)
+                    # Capture the row for logging/reporting BEFORE update/delete
                     row_before = ln3_df.iloc[idx0].copy()
 
+                    # Write to Use_log (always)
+                    use_log_data = build_use_log_row(
+                        row=row_before,
+                        use_amt=int(use_amt),
+                        user_initials=user_initials,
+                        shipping_to=shipping_to,
+                    )
+                    append_row_by_header(service, USE_LOG_TAB, use_log_data)
+
+                    # Update LN3 (or delete if reaches 0)
                     if new_amount == 0:
                         delete_ln3_row_by_index(service, idx0)
-                        st.success("Usage logged ✅ TubeAmount reached 0 — row deleted.")
+                        st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN3 row deleted.")
                     else:
                         update_ln3_tubeamount_by_index(service, idx0=idx0, new_amount=new_amount)
-                        st.success(f"Usage logged ✅ Used {int(use_amt)} (remaining: {new_amount})")
+                        st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
-                    # Append usage record to FINAL REPORT (TubeAmount hidden)
-                    st.session_state.usage_final_rows.append(build_usage_report_row(row_before, int(use_amt)))
+                    # Append to on-screen final report (session)
+                    st.session_state.usage_final_rows.append(build_final_report_row(row_before, int(use_amt)))
 
                     # Reload LN3 after update/delete
                     ln3_df = read_tab(LN3_TAB)
 
+                    # After delete, rerun recommended (row indices shift)
                     if new_amount == 0:
                         st.rerun()
 
@@ -681,7 +712,7 @@ else:
                     st.code(str(e), language="text")
 
         # -------- OUTSIDE FORM: FINAL REPORT (TubeAmount hidden) --------
-        st.markdown("### ✅ Final Usage Report (appended)")
+        st.markdown("### ✅ Final Usage Report (session view; saved permanently in Use_log)")
         final_cols = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "Memo", "BoxID", "Use"]
 
         if st.session_state.usage_final_rows:
@@ -690,16 +721,28 @@ else:
 
             csv_bytes = final_df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇️ Download final usage report CSV",
+                "⬇️ Download final usage report CSV (session)",
                 data=csv_bytes,
-                file_name="LN3_final_usage_report.csv",
+                file_name="LN3_final_usage_report_session.csv",
                 mime="text/csv",
                 key="download_final_usage_report",
             )
 
-            if st.button("🧹 Clear final report", key="clear_final_report"):
+            if st.button("🧹 Clear session report", key="clear_final_report"):
                 st.session_state.usage_final_rows = []
-                st.success("Final report cleared.")
+                st.success("Session report cleared (Use_log remains saved).")
         else:
-            st.info("No usage records yet. Submit usage to build the final report.")
+            st.info("No usage records in this session yet. Submit usage to build the session report.")
 
+# ============================================================
+# 4) Use_log viewer (optional convenience)
+# ============================================================
+st.subheader("🧾 Use_log (saved Final Usage Report)")
+try:
+    use_log_df = read_tab(USE_LOG_TAB)
+    if use_log_df.empty:
+        st.info("Use_log is empty.")
+    else:
+        st.dataframe(use_log_df, use_container_width=True, hide_index=True)
+except Exception as e:
+    st.warning(f"Unable to read Use_log: {e}")
