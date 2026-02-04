@@ -13,31 +13,18 @@
 #       BoxNumber: code = (HP/HN)-(COC/CAN/POL/NON-DRUG)
 #       BoxUID: auto = LN3-R{rack:02d}-{HP/HN}-{COC/CAN/POL/NON-DRUG}-{01..99}
 #       TubeNumber: "TubePrefix TubeInput" (one space)
-#       TubeAmount: user input (stored in sheet but HIDDEN in UI for usage log/report)
+#       TubeAmount: user input (stored in sheet)
 #       Memo: user input
 #       QRCodeLink: auto-generated (QuickChart PNG URL) and written to sheet
 #   - Search by BoxNumber: shows all matching rows (incl TubeAmount, BoxUID, QRCodeLink)
-#   - Shows QR preview (download outside st.form)
+#   - QR download button is OUTSIDE st.form() (Streamlit requirement)
 #
 # ✅ Log Usage (subtract from TubeAmount) + Final Report (append records)
-#   - Select BoxNumber -> TubeNumber -> (optional BoxUID if duplicates)
-#   - Enter Use
-#   - On submit: TubeAmount = TubeAmount - Use
-#   - UI hides TubeAmount (shows Use instead)
-#   - Final report APPENDS each usage log record:
+#   - Current matching record(s): SHOW TubeAmount
+#   - Final report: HIDE TubeAmount, show Use instead
+#   - Each usage submit appends a record to final report:
 #       RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
 #   - Download buttons are OUTSIDE st.form() (Streamlit requirement)
-#
-# IMPORTANT:
-#   - LN3 header row (row 1) should include these columns (order recommended):
-#       RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo | QRCodeLink
-#   - If you also have a "BoxID" column, it will be included in the final report.
-#   - Sheet must be shared with the service account email (Editor required for LN3 writes).
-#
-# Streamlit Secrets:
-#   [google_service_account]  (service account json fields)
-#   [connections.gsheets]
-#   spreadsheet = "YOUR_SPREADSHEET_ID"
 
 import re
 import urllib.parse
@@ -58,9 +45,8 @@ if "last_qr_link" not in st.session_state:
     st.session_state.last_qr_link = ""
 if "last_qr_uid" not in st.session_state:
     st.session_state.last_qr_uid = ""
-
 if "usage_final_rows" not in st.session_state:
-    st.session_state.usage_final_rows = []  # list[dict], append each usage record
+    st.session_state.usage_final_rows = []  # list of dicts appended per submit
 
 # -------------------- Constants --------------------
 DISPLAY_TABS = ["Cocaine", "Cannabis", "HIV-neg-nondrug", "HIV+nondrug"]
@@ -151,10 +137,6 @@ def build_box_map() -> dict:
     return m
 
 def ensure_ln3_header(service):
-    """
-    If LN3 header row is blank, write expected header.
-    If LN3 exists but missing required columns, show warning (do not auto-shift existing columns).
-    """
     expected = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
 
     resp = service.spreadsheets().values().get(
@@ -184,10 +166,6 @@ def ensure_ln3_header(service):
         )
 
 def compute_next_boxuid(ln3_df: pd.DataFrame, rack: int, hp_hn: str, drug_code: str) -> str:
-    """
-    BoxUID: LN3-R{rack:02d}-{HP/HN}-{COC/CAN/POL/NON-DRUG}-{NN}
-    NN increments within same (rack + HP/HN + drug_code), 01..99
-    """
     prefix = f"LN3-R{int(rack):02d}-{hp_hn}-{drug_code}-"
     max_n = 0
 
@@ -224,7 +202,6 @@ def append_ln3_row(service, row_values: list):
     ).execute()
 
 def col_to_a1(col_idx_0based: int) -> str:
-    """0->A, 25->Z, 26->AA ..."""
     n = col_idx_0based + 1
     s = ""
     while n:
@@ -251,11 +228,6 @@ def to_int_amount(x, default=0) -> int:
         return default
 
 def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, box_uid: str = ""):
-    """
-    Find matching DataFrame index (0-based) for a row to update.
-    Matches BoxNumber + TubeNumber; if box_uid provided, also match BoxUID.
-    Returns (idx0, current_amount_int) or (None, None).
-    """
     if ln3_df is None or ln3_df.empty:
         return None, None
 
@@ -282,10 +254,6 @@ def find_ln3_row_index(ln3_df: pd.DataFrame, box_number: str, tube_number: str, 
     return idx0, cur_amount
 
 def update_ln3_tubeamount_by_index(service, idx0: int, new_amount: int):
-    """
-    Update TubeAmount cell for a given DataFrame index (0-based).
-    Sheet row = idx0 + 2 (header row is 1).
-    """
     header = get_ln3_header(service)
     if "TubeAmount" not in header:
         raise ValueError("LN3 sheet header missing 'TubeAmount' column.")
@@ -305,23 +273,19 @@ def get_col_value(row: pd.Series, col: str) -> str:
     return safe_strip(row.get(col, "")) if row is not None else ""
 
 def build_usage_report_row(updated_row: pd.Series, use_amt: int) -> dict:
-    """
-    Final report columns:
-    RackNumber | BoxNumber | BoxUID | TubeNumber | Memo | BoxID | Use
-    BoxID will be blank if your LN3 tab does not contain a 'BoxID' column.
-    """
+    # Final report does NOT include TubeAmount
     return {
         "RackNumber": get_col_value(updated_row, "RackNumber"),
         "BoxNumber":  get_col_value(updated_row, "BoxNumber"),
         "BoxUID":     get_col_value(updated_row, "BoxUID"),
         "TubeNumber": get_col_value(updated_row, "TubeNumber"),
         "Memo":       get_col_value(updated_row, "Memo"),
-        "BoxID":      get_col_value(updated_row, "BoxID"),
+        "BoxID":      get_col_value(updated_row, "BoxID"),  # blank if missing
         "Use":        int(use_amt),
     }
 
 # ============================================================
-# Sidebar (Box Location tab selector)
+# Sidebar
 # ============================================================
 with st.sidebar:
     st.subheader("Box Location")
@@ -368,7 +332,7 @@ except Exception as e:
     st.code(str(e), language="text")
 
 # ============================================================
-# 2) LN3 LIQUID NITROGEN TANK
+# 2) LN3
 # ============================================================
 st.divider()
 st.header("🧊 LN3 Liquid Nitrogen Tank")
@@ -411,7 +375,6 @@ with st.form("ln3_add", clear_on_submit=True):
     tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
     memo = st.text_area("Memo (optional)")
 
-    # Preview
     preview_uid, preview_qr, preview_err = "", "", ""
     try:
         preview_uid = compute_next_boxuid(ln3_df, rack, hp_hn, drug_code)
@@ -428,8 +391,6 @@ with st.form("ln3_add", clear_on_submit=True):
     st.markdown("**QR Preview (~1cm x 1cm):**")
     if preview_qr:
         st.image(preview_qr, width=QR_PX)
-    else:
-        st.info("QR preview unavailable until BoxUID can be generated.")
 
     submitted = st.form_submit_button("Save to LN3", type="primary")
 
@@ -454,10 +415,7 @@ with st.form("ln3_add", clear_on_submit=True):
             append_ln3_row(service, row)
             st.success(f"Saved ✅ {box_uid}")
 
-            # Refresh LN3
             ln3_df = read_tab(LN3_TAB)
-
-            # Store for download outside form
             st.session_state.last_qr_link = qr_link
             st.session_state.last_qr_uid = box_uid
 
@@ -479,7 +437,6 @@ if st.session_state.last_qr_link:
             mime="image/png",
             key="download_last_qr_png",
         )
-        st.caption("QRCodeLink is stored in the sheet and is clickable.")
     except Exception as e:
         st.warning(f"Saved, but QR download failed: {e}")
 
@@ -495,23 +452,16 @@ st.subheader("🔎 Search LN3 by BoxNumber (includes TubeAmount, BoxUID, QRCodeL
 if ln3_df is not None and (not ln3_df.empty) and ("BoxNumber" in ln3_df.columns):
     opts = sorted([safe_strip(x) for x in ln3_df["BoxNumber"].dropna().unique().tolist() if safe_strip(x)])
     chosen = st.selectbox("BoxNumber (LN3)", ["(select)"] + opts, key="search_boxnumber")
-
     if chosen != "(select)":
         res = ln3_df[ln3_df["BoxNumber"].astype(str).map(safe_strip) == chosen].copy()
         st.dataframe(res, use_container_width=True, hide_index=True)
-
-        if "BoxUID" in res.columns and "QRCodeLink" in res.columns and len(res) > 0:
-            first_qr = safe_strip(res.iloc[0].get("QRCodeLink", ""))
-            if first_qr:
-                st.markdown("**QR Preview (first matching record):**")
-                st.image(first_qr, width=QR_PX)
 else:
     st.info("No BoxNumber data available yet (LN3 empty or missing BoxNumber column).")
 
 # ============================================================
-# 3) LOG USAGE + FINAL REPORT (HIDE TubeAmount, SHOW Use)
+# 3) LOG USAGE + FINAL REPORT (SHOW TubeAmount in current, HIDE in final)
 # ============================================================
-st.subheader("📉 Log Usage (subtract from TubeAmount, report appends)")
+st.subheader("📉 Log Usage (subtract from TubeAmount, append final report)")
 
 if ln3_df is None or ln3_df.empty:
     st.info("LN3 is empty — nothing to log.")
@@ -552,24 +502,17 @@ else:
                     if chosen_uid == "(select)":
                         chosen_uid = ""
 
-            # Show matching record(s) BUT HIDE TubeAmount
+            # Current matching record(s): SHOW TubeAmount
             if chosen_tube != "(select)":
                 show = sub[sub["TubeNumber"] == safe_strip(chosen_tube)].copy()
                 if chosen_uid and "BoxUID" in show.columns:
                     show["BoxUID"] = show["BoxUID"].astype(str).map(safe_strip)
                     show = show[show["BoxUID"] == safe_strip(chosen_uid)].copy()
 
-                 show_ui = show.copy()
-                 if "TubeAmount" in show_ui.columns:
-                     show_ui = show_ui.drop(columns=["TubeAmount"])
-                # st.markdown("**Current matching record(s):** (TubeAmount hidden)")
-                # st.dataframe(show_ui, use_container_width=True, hide_index=True)
-        
-        st.markdown("**Current matching record(s):**")
-        st.dataframe(show, use_container_width=True, hide_index=True)
+                st.markdown("**Current matching record(s):**")
+                st.dataframe(show, use_container_width=True, hide_index=True)
 
-
-        # -------- FORM (no download button inside) --------
+        # -------- FORM (no download inside) --------
         with st.form("ln3_use_form"):
             use_amt = st.number_input("Use", min_value=0, step=1, value=1)
             submitted_use = st.form_submit_button("Submit Usage", type="primary")
@@ -601,7 +544,7 @@ else:
                     update_ln3_tubeamount_by_index(service=service, idx0=idx0, new_amount=new_amount)
                     st.success(f"Usage logged ✅ Used {int(use_amt)}")
 
-                    # Reload LN3 to fetch updated row(s)
+                    # Reload LN3, match updated row(s)
                     ln3_df = read_tab(LN3_TAB)
 
                     rep = ln3_df.copy()
@@ -613,15 +556,13 @@ else:
                         mask = mask & (rep["BoxUID"] == safe_strip(chosen_uid))
 
                     updated_row_df = ln3_df[mask].copy()
-
-                    # Append each updated row to final report list (TubeAmount hidden; Use shown)
-                    if not updated_row_df.empty:
+                    if updated_row_df.empty:
+                        st.warning("Updated, but could not find the updated row after refresh.")
+                    else:
                         for _, r in updated_row_df.iterrows():
                             st.session_state.usage_final_rows.append(
                                 build_usage_report_row(r, int(use_amt))
                             )
-                    else:
-                        st.warning("Updated, but could not find the updated row after refresh.")
 
                 except HttpError as e:
                     st.error("Google Sheets API error while logging usage.")
@@ -630,7 +571,7 @@ else:
                     st.error("Failed to log usage.")
                     st.code(str(e), language="text")
 
-        # -------- OUTSIDE FORM: FINAL REPORT (APPENDED) + DOWNLOAD --------
+        # -------- OUTSIDE FORM: FINAL REPORT (TubeAmount hidden) --------
         st.markdown("### ✅ Final Usage Report (appended)")
         final_cols = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "Memo", "BoxID", "Use"]
 
@@ -651,11 +592,9 @@ else:
                 mime="text/csv",
                 key="download_final_usage_report",
             )
-        else:
-            st.info("No usage records yet. Submit usage to build the final report.")
 
-        # Optional: Clear report button
-        if st.session_state.usage_final_rows:
             if st.button("🧹 Clear final report", key="clear_final_report"):
                 st.session_state.usage_final_rows = []
                 st.success("Final report cleared.")
+        else:
+            st.info("No usage records yet. Submit usage to build the final report.")
