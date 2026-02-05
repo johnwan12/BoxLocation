@@ -2,18 +2,29 @@
 # ✅ Box Location (study tabs) + ✅ LN (multi-tank) + ✅ Freezer Inventory + ✅ Use_log
 #
 # UPDATE (per your request):
-# ✅ Global max BoxID must be computed ONLY from:
-#   - tab 'boxNumber' (column 'BoxNumber' or variants)
-#   - tab 'Freezer_Inventory' (column 'BoxNumber' or variants)
-# NOT from cocaine/cannabis/HIV tabs.
+# ✅ Global max BoxID = MAX(BoxID) from:
+#   - tab 'boxNumber' (explicit numeric column 'BoxID')
+#   - tab 'Freezer_Inventory' (explicit numeric column 'BoxID')
+# (No parsing from BoxNumber text.)
 #
-# NEW tab:
+# New tab:
 # ✅ Freezer_Inventory
 #   Columns include your list PLUS TubeAmount, BoxID, TubePrefix
 #
 # Use_log:
 # ✅ Permanent usage storage
 # ✅ Session Final Usage Report (TubeAmount hidden)
+#
+# Recommended headers:
+#   boxNumber (row 1) should include BoxID + BoxNumber at minimum
+#   Freezer_Inventory (row 1):
+#     FreezerID | Date Collected | Box Number | StudyCode | Samples Received | Missing Samples | Group |
+#     Urine Results | All Collected By | TubePrefix | TubeAmount | BoxID | Memo
+#   Use_log (row 1):
+#     StorageType | StorageID | TankID | RackNumber | BoxNumber | BoxUID | BoxID | TubeNumber | TubePrefix |
+#     Use | User | Time_stamp | ShippingTo | Memo
+#   LN3 (LN_TAB) recommended (row 1):
+#     TankID | RackNumber | BoxNumber | BoxUID | TubeNumber | TubeAmount | Memo | BoxID | QRCodeLink
 
 import re
 import urllib.parse
@@ -48,9 +59,8 @@ TAB_MAP = {
     "HIV+nondrug": "HIV+nondrug",
 }
 
-BOX_TAB = "boxNumber"  # source of truth for BoxNumber mapping and global BoxID parsing
-
-LN_TAB = "LN3"  # one inventory tab for all LN tanks (recommended header includes TankID)
+BOX_TAB = "boxNumber"  # should contain BoxID + BoxNumber (source of truth for max BoxID)
+LN_TAB = "LN3"         # one inventory tab for all LN tanks (recommended: includes TankID column)
 FREEZER_TAB = "Freezer_Inventory"
 USE_LOG_TAB = "Use_log"
 
@@ -165,59 +175,34 @@ def to_int_amount(x, default=0) -> int:
     except Exception:
         return default
 
-# -------------------- Global BoxID from BoxNumber ONLY --------------------
-def extract_boxid_from_boxnumber(val: str) -> int | None:
-    """
-    Extract numeric BoxID from BoxNumber-like strings.
-    Uses the LAST integer in the string.
-      "19" -> 19
-      "BOX-19" -> 19
-      "HN-COC-02" -> 2
-      "LN3-R06-HP-COC-01" -> 1
-    Returns None if no digits exist.
-    """
-    s = safe_strip(val)
-    if not s:
-        return None
-    nums = re.findall(r"\d+", s)
-    if not nums:
-        return None
-    try:
-        return int(nums[-1])
-    except Exception:
-        return None
-
-def max_boxid_from_col(df: pd.DataFrame, col: str) -> int:
+# -------------------- Global max BoxID (explicit BoxID columns only) --------------------
+def max_boxid_from_boxid_col(df: pd.DataFrame, col: str = "BoxID") -> int:
     if df is None or df.empty or col not in df.columns:
         return 0
-    mx = 0
-    for v in df[col].dropna().astype(str):
-        n = extract_boxid_from_boxnumber(v)
-        if n is not None:
-            mx = max(mx, n)
-    return mx
+    s = pd.to_numeric(df[col], errors="coerce").dropna()
+    if s.empty:
+        return 0
+    return int(s.max())
 
 def compute_global_max_boxid_from_boxnumber_and_freezer() -> int:
     """
-    ✅ Source of truth:
-      - tab 'boxNumber' (BoxNumber column)
-      - tab 'Freezer_Inventory' (Box Number column)
+    ✅ Global max BoxID = max(BoxID) from:
+      - boxNumber.BoxID
+      - Freezer_Inventory.BoxID
     """
     mx = 0
 
-    # 1) boxNumber
+    # boxNumber
     try:
         d = read_tab(BOX_TAB)
-        for col in ["BoxNumber", "Box Number", "Box", "Box#", "Box #"]:
-            mx = max(mx, max_boxid_from_col(d, col))
+        mx = max(mx, max_boxid_from_boxid_col(d, "BoxID"))
     except Exception:
         pass
 
-    # 2) Freezer_Inventory
+    # Freezer_Inventory
     try:
         fz = read_tab(FREEZER_TAB)
-        for col in ["Box Number", "BoxNumber", "Box", "Box#", "Box #"]:
-            mx = max(mx, max_boxid_from_col(fz, col))
+        mx = max(mx, max_boxid_from_boxid_col(fz, "BoxID"))
     except Exception:
         pass
 
@@ -246,6 +231,16 @@ def build_box_map() -> dict:
     return m
 
 # -------------------- Ensure headers --------------------
+def ensure_boxnumber_has_boxid(service):
+    hdr = get_header(service, BOX_TAB)
+    if not hdr:
+        st.warning("boxNumber header is empty. Please add header row (must include BoxID, BoxNumber).")
+        return
+    if "BoxID" not in hdr:
+        st.warning("boxNumber tab is missing column 'BoxID'. Global max BoxID will be wrong until you add BoxID.")
+    if "BoxNumber" not in hdr and "Box Number" not in hdr:
+        st.warning("boxNumber tab is missing column 'BoxNumber' (or 'Box Number').")
+
 def ensure_ln_header(service):
     required = ["RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "QRCodeLink"]
     recommended = ["TankID", "RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
@@ -282,7 +277,6 @@ def ensure_freezer_header(service):
         st.warning(f"{FREEZER_TAB} header missing columns: {', '.join(missing)}")
 
 def ensure_use_log_header(service):
-    # Expanded schema to support LN + Freezer (safe if you already added some columns)
     expected = [
         "StorageType",   # "LN" or "Freezer"
         "StorageID",     # LN1/LN2/LN3 or Sammy/Tom/Jerry
@@ -510,6 +504,9 @@ try:
 
             selected_studyid = st.selectbox("Select StudyID", ["(select)"] + options)
             if selected_studyid != "(select)":
+                service = sheets_service()
+                ensure_boxnumber_has_boxid(service)  # warn if BoxID missing in boxNumber
+
                 box_map = build_box_map()
                 box = box_map.get(safe_strip(selected_studyid).upper(), "")
                 st.markdown("**BoxNumber:**")
@@ -533,6 +530,7 @@ st.header("🧊 Storage Inventory")
 
 service = sheets_service()
 ensure_use_log_header(service)
+ensure_boxnumber_has_boxid(service)
 
 # ---------- Session Final Usage Report ----------
 st.subheader("✅ Final Usage Report (session view; permanently saved in Use_log)")
@@ -603,9 +601,9 @@ if STORAGE_TYPE == "LN Tank":
 
         box_number = f"{hp_hn}-{drug_code}"
 
-        # ✅ Global max BoxID from boxNumber + Freezer_Inventory ONLY
+        # ✅ Global max BoxID (explicit BoxID) from boxNumber + Freezer_Inventory only
         global_max_boxid = compute_global_max_boxid_from_boxnumber_and_freezer()
-        st.caption(f"Global max BoxID (boxNumber + Freezer_Inventory): {global_max_boxid if global_max_boxid else '(none)'}")
+        st.caption(f"Global max BoxID (boxNumber.BoxID + Freezer_Inventory.BoxID): {global_max_boxid if global_max_boxid else '(none)'}")
 
         box_choice = st.radio("BoxID option", ["Use the previous box", "Open a new box"], horizontal=True)
         opened_new_box = (box_choice == "Open a new box")
@@ -891,9 +889,9 @@ else:
 
         memo = st.text_area("Memo (optional)")
 
-        # ✅ Global max BoxID from boxNumber + Freezer_Inventory ONLY
+        # ✅ Global max BoxID (explicit BoxID) from boxNumber + Freezer_Inventory only
         global_max_boxid = compute_global_max_boxid_from_boxnumber_and_freezer()
-        st.caption(f"Global max BoxID (boxNumber + Freezer_Inventory): {global_max_boxid if global_max_boxid else '(none)'}")
+        st.caption(f"Global max BoxID (boxNumber.BoxID + Freezer_Inventory.BoxID): {global_max_boxid if global_max_boxid else '(none)'}")
 
         box_choice = st.radio("BoxID option", ["Use the previous box", "Open a new box"], horizontal=True)
         opened_new_box = (box_choice == "Open a new box")
