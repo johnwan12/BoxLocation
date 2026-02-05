@@ -1,5 +1,14 @@
 # BoxLocation.py
 # Streamlit app: Box Location + LN Tank + Freezer Inventory + Use Log preview
+# Updates included:
+# 1) Max Box logic is based on MAX(BoxLabel_group numeric part) across 'boxNumber' + 'Freezer_Inventory'
+# 2) BoxID rule:
+#       Use the previous box = current_max_boxnumber
+#       Open a new box       = current_max_boxnumber + 1
+# 3) 'Group' column renamed to 'BoxLabel_group'
+# 4) Freezer entry order:
+#       Date collected, StudyCode, BoxLabel_group, Prefix, Tube suffix, BoxID, All Collected By, Memo
+# 5) Show "Max Box Logic" BEFORE BoxID selector
 
 import urllib.parse
 import urllib.request
@@ -139,57 +148,75 @@ def fetch_image_bytes(url: str) -> bytes:
         return r.read()
 
 # ────────────────────────────────────────────────
-# BoxID Logic – robust detection (BoxID / Box ID / boxid, etc.)
+# Max Box Logic (based on BoxLabel_group / BoxNumber variants)
 # ────────────────────────────────────────────────
-def find_boxid_col(df: pd.DataFrame) -> str | None:
+def find_boxlabel_col(df: pd.DataFrame) -> str | None:
+    """
+    Detect the column storing the box label/group across schema changes.
+    Accepts BoxLabel_group / BoxNumber / Group / Box Number.
+    """
     if df.empty:
         return None
 
-    # Normalize: lower + strip + remove spaces
-    norm = {c: safe_strip(c).lower().replace(" ", "") for c in df.columns}
+    normalized = {
+        safe_strip(c).lower().replace(" ", "").replace("_", ""): c
+        for c in df.columns
+    }
 
-    # Common variants
-    candidates = {"boxid", "box_id", "boxid#", "boxidnum", "boxidentifier"}
+    # Prefer new name first
+    candidates = [
+        "boxlabelgroup",   # BoxLabel_group
+        "boxnumber",       # BoxNumber
+        "group",           # legacy Group
+        "boxlabel",        # fallback
+        "boxnumbergroup",  # rare variants
+    ]
 
-    for original, n in norm.items():
-        if n in candidates:
-            return original
-
-    # Also accept if removing underscores yields boxid
-    for original, n in norm.items():
-        if n.replace("_", "") == "boxid":
-            return original
+    for cand in candidates:
+        if cand in normalized:
+            return normalized[cand]
 
     return None
 
-def get_max_boxid(df: pd.DataFrame) -> int:
-    col = find_boxid_col(df)
-    if not col:
+def extract_max_number(series: pd.Series) -> int:
+    """
+    Extract first integer from strings like:
+      AD-BOX-012 -> 12
+      LN3-R01-HP-CAN-03 -> 3
+    Return max; if none found -> 0.
+    """
+    if series is None or series.empty:
         return 0
-
-    s = df[col].astype(str).str.strip()
-
-    # Extract first integer from cells like "12", "BoxID 12", "12 (new)"
-    extracted = s.str.extract(r"(\d+)", expand=False)
-    nums = pd.to_numeric(extracted, errors="coerce").dropna()
-
+    s = series.astype(str)
+    nums = pd.to_numeric(s.str.extract(r"(\d+)", expand=False), errors="coerce").dropna()
     return int(nums.max()) if not nums.empty else 0
 
+def get_max_boxnumber_in_tab(tab_name: str) -> int:
+    df = read_tab(tab_name)
+    col = find_boxlabel_col(df)
+    if not col:
+        return 0
+    return extract_max_number(df[col])
+
 @st.cache_data(ttl=5)
-def current_max_boxid() -> int:
-    mx = 0
-    for tab in [BOX_TAB, FREEZER_TAB]:
-        df = read_tab(tab)
-        mx = max(mx, get_max_boxid(df))
-    return mx
+def current_max_boxnumber() -> int:
+    return max(
+        get_max_boxnumber_in_tab(BOX_TAB),
+        get_max_boxnumber_in_tab(FREEZER_TAB),
+    )
 
 def resolve_boxid(choice: str) -> tuple[int, bool]:
-    mx = current_max_boxid()
+    """
+    BoxID rule:
+      Use previous box -> current_max_boxnumber
+      Open a new box   -> current_max_boxnumber + 1
+    """
+    mx = current_max_boxnumber()
+    if mx == 0:
+        return 1, True  # first-ever box
     if choice == "Open a new box":
         return mx + 1, True
-    else:
-        # If nothing found yet, start at 1; otherwise use the max
-        return (mx if mx > 0 else 1), False
+    return mx, False
 
 def show_new_box_reminder(boxid: int):
     st.markdown(
@@ -230,13 +257,17 @@ try:
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    st.subheader("StudyID → Box Number")
+    st.subheader("StudyID → Box Label")
     box_map = {}
     box_df = read_tab(BOX_TAB)
-    if not box_df.empty:
+
+    # Detect which column holds the box label/group in boxNumber tab
+    label_col = find_boxlabel_col(box_df) if not box_df.empty else None
+
+    if (not box_df.empty) and label_col:
         for _, r in box_df.iterrows():
             sid = safe_strip(r.get("StudyID", "")).upper()
-            bx = safe_strip(r.get("BoxNumber", ""))
+            bx = safe_strip(r.get(label_col, ""))
             if sid and bx:
                 box_map[sid] = bx
 
@@ -244,7 +275,7 @@ try:
     sel = st.selectbox("StudyID", ["—"] + study_ids)
     if sel != "—":
         bx = box_map.get(sel, "")
-        st.metric("Box Number", bx or "Not found", delta_color="off" if bx else "normal")
+        st.metric("Box Label", bx or "Not found", delta_color="off" if bx else "normal")
 except Exception as e:
     st.error(f"Box Location error: {e}")
 
@@ -253,15 +284,6 @@ except Exception as e:
 # ────────────────────────────────────────────────
 st.divider()
 st.header("🧊 Storage")
-
-# Debug (optional but useful)
-with st.expander("🔎 Debug BoxID max (boxNumber + Freezer_Inventory)", expanded=False):
-    for tab in [BOX_TAB, FREEZER_TAB]:
-        d = read_tab(tab)
-        col = find_boxid_col(d)
-        st.write(tab, "columns =", list(d.columns))
-        st.write(tab, "detected BoxID column =", col)
-        st.write(tab, "max BoxID =", get_max_boxid(d))
 
 # Session usage preview
 st.subheader("Session Final Usage Report")
@@ -277,9 +299,10 @@ else:
 
 # ── LN Tank ──────────────────────────────────────
 if storage_type == "LN Tank":
+    # LN schema uses BoxLabel_group (renamed from Group/BoxNumber)
     set_header_if_blank(
         LN_TAB,
-        ["TankID","RackNumber","BoxNumber","BoxUID","TubeNumber","TubeAmount","Memo","BoxID","QRCodeLink"],
+        ["TankID","RackNumber","BoxLabel_group","BoxUID","TubeNumber","TubeAmount","Memo","BoxID","QRCodeLink"],
     )
 
     ln_df = read_tab(LN_TAB)
@@ -296,9 +319,12 @@ if storage_type == "LN Tank":
         hiv  = c1.selectbox("HIV",  ["HIV+","HIV-"])
         drug = c2.selectbox("Drug", ["Cocaine","Cannabis","Poly","NON-DRUG"])
 
+        # Max Box Logic BEFORE BoxID
+        mx_box = current_max_boxnumber()
+        st.markdown(f"**Max Box (boxNumber + Freezer_Inventory):** `{mx_box or 0}`")
+
         box_choice = st.radio("BoxID", ["Use the previous box", "Open a new box"], horizontal=True)
         boxid, is_new = resolve_boxid(box_choice)
-        st.caption(f"Current highest BoxID (boxNumber + Freezer_Inventory): **{current_max_boxid() or '—'}**")
         st.text_input("BoxID", str(boxid), disabled=True, key="ln_boxid")
 
         c3, c4 = st.columns(2)
@@ -308,7 +334,7 @@ if storage_type == "LN Tank":
         amount = st.number_input("Tube count", 0, step=1, value=1)
         memo   = st.text_area("Memo", height=90)
 
-        # --- BoxUID preview (robust, no undefined vars)
+        # --- BoxUID preview (robust)
         prefix_str = f"{tank}-R{rack:02d}-{HIV_CODE[hiv]}-{DRUG_CODE[drug]}-"
         seq = 1
         try:
@@ -360,7 +386,7 @@ if storage_type == "LN Tank":
                     row = {
                         "TankID": tank,
                         "RackNumber": rack,
-                        "BoxNumber": f"{HIV_CODE[hiv]}-{DRUG_CODE[drug]}",
+                        "BoxLabel_group": f"{HIV_CODE[hiv]}-{DRUG_CODE[drug]}",
                         "BoxUID": box_uid2,
                         "TubeNumber": f"{prefix} {suffix}",
                         "TubeAmount": amount,
@@ -391,55 +417,57 @@ if storage_type == "LN Tank":
 
 # ── Freezer ──────────────────────────────────────
 else:
-    set_header_if_blank(FREEZER_TAB, [
-        "FreezerID","Date Collected","Box Number","StudyCode","Samples Received","Missing Samples",
-        "Group","Urine Results","All Collected By","TubePrefix","TubeAmount","BoxID","Memo"
-    ])
+    # Freezer schema + header order exactly as requested
+    FREEZER_HEADER = [
+        "Date collected",
+        "StudyCode",
+        "BoxLabel_group",
+        "Prefix",
+        "Tube suffix",
+        "BoxID",
+        "All Collected By",
+        "Memo",
+    ]
+    set_header_if_blank(FREEZER_TAB, FREEZER_HEADER)
 
     fz_df = read_tab(FREEZER_TAB)
-    view = fz_df[fz_df["FreezerID"] == freezer] if "FreezerID" in fz_df else fz_df
-
     st.subheader(f"Freezer – {freezer}")
+    st.dataframe(fz_df, use_container_width=True, hide_index=True)
 
     with st.form("fz_add", clear_on_submit=True):
+        # Entry order exactly as requested
         date = st.date_input("Date collected", datetime.now(NY_TZ).date())
-        box_nr = st.text_input("Box Number", placeholder="e.g. AD-BOX-001").strip()
-        study  = st.text_input("StudyCode", placeholder="AD").strip()
+        study = st.text_input("StudyCode").strip()
+        boxlabel = st.text_input("BoxLabel_group", placeholder="e.g. HP-COC").strip()
 
         c1, c2 = st.columns(2)
-        received = c1.number_input("Samples received", 0)
-        missing  = c2.number_input("Missing", 0)
+        prefix = c1.text_input("Prefix", placeholder="e.g. Serum / DNA").strip()
+        tube_suffix = c2.text_input("Tube suffix", placeholder="e.g. 02 036").strip()
 
-        group = st.text_input("Group").strip()
-        urine = st.text_input("Urine results").strip()
-        by    = st.text_input("Collected by").strip()
-        prefix = st.text_input("Tube prefix", placeholder="Serum / DNA").strip()
-        amount = st.number_input("Tube count", 0, step=1, value=1)
-        memo   = st.text_area("Memo", height=90)
+        # Max Box Logic BEFORE BoxID
+        mx_box = current_max_boxnumber()
+        st.markdown(f"**Max Box (boxNumber + Freezer_Inventory):** `{mx_box or 0}`")
 
         box_choice = st.radio("BoxID", ["Use the previous box", "Open a new box"], horizontal=True, key="fz_choice")
         boxid, is_new = resolve_boxid(box_choice)
-        st.caption(f"Current highest BoxID (boxNumber + Freezer_Inventory): **{current_max_boxid() or '—'}**")
         st.text_input("BoxID", str(boxid), disabled=True, key="fz_boxid")
 
+        collected_by = st.text_input("All Collected By").strip()
+        memo = st.text_area("Memo", height=90)
+
         if st.form_submit_button("Save Freezer record", type="primary"):
-            if not all([box_nr, study, prefix]):
-                st.error("Box Number, StudyCode and Tube prefix are required.")
+            if not all([study, boxlabel, prefix, tube_suffix]):
+                st.error("StudyCode, BoxLabel_group, Prefix, and Tube suffix are required.")
             else:
                 try:
                     row = {
-                        "FreezerID": freezer,
-                        "Date Collected": date.strftime("%m/%d/%Y"),
-                        "Box Number": box_nr,
+                        "Date collected": date.strftime("%m/%d/%Y"),
                         "StudyCode": study,
-                        "Samples Received": received,
-                        "Missing Samples": missing,
-                        "Group": group,
-                        "Urine Results": urine,
-                        "All Collected By": by,
-                        "TubePrefix": prefix,
-                        "TubeAmount": amount,
+                        "BoxLabel_group": boxlabel,
+                        "Prefix": prefix,
+                        "Tube suffix": tube_suffix,
                         "BoxID": str(boxid),
+                        "All Collected By": collected_by,
                         "Memo": memo,
                     }
                     append_row(FREEZER_TAB, row)
@@ -448,9 +476,6 @@ else:
                         show_new_box_reminder(boxid)
                 except Exception as e:
                     st.error(f"Save failed: {e}")
-
-    st.subheader(f"{freezer} content")
-    st.dataframe(view, use_container_width=True, hide_index=True)
 
 # ────────────────────────────────────────────────
 # Use Log (view only for now)
