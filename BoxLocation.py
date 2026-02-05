@@ -1,7 +1,6 @@
 # BoxLocation.py
 # Streamlit app: Box Location + LN Tank + Freezer Inventory + Use Log preview
 
-import re
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -10,7 +9,6 @@ import pytz
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 # ────────────────────────────────────────────────
 # Page & Session State
@@ -68,7 +66,8 @@ def get_sheets_service():
 # ────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────
-def safe_strip(x): return "" if x is None else str(x).strip()
+def safe_strip(x) -> str:
+    return "" if x is None else str(x).strip()
 
 def read_tab(tab_name: str) -> pd.DataFrame:
     service = get_sheets_service()
@@ -78,10 +77,20 @@ def read_tab(tab_name: str) -> pd.DataFrame:
             range=f"'{tab_name}'!A1:ZZ",
             valueRenderOption="UNFORMATTED_VALUE",
         ).execute()
+
         values = resp.get("values", [])
-        if not values: return pd.DataFrame()
+        if not values:
+            return pd.DataFrame()
+
         header = [safe_strip(h) for h in values[0]]
-        rows = [r[:len(header)] + [""] * (len(header) - len(r)) if len(r) < len(header) else r[:len(header)] for r in values[1:]]
+        rows = []
+        for r in values[1:]:
+            if len(r) < len(header):
+                r = r[:len(header)] + [""] * (len(header) - len(r))
+            else:
+                r = r[:len(header)]
+            rows.append(r)
+
         return pd.DataFrame(rows, columns=header)
     except Exception as e:
         st.error(f"Cannot read tab '{tab_name}': {e}")
@@ -91,13 +100,14 @@ def get_header(tab: str) -> list:
     service = get_sheets_service()
     resp = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"'{tab}'!A1:Z1",
+        range=f"'{tab}'!A1:ZZ1",
     ).execute()
     return [safe_strip(x) for x in (resp.get("values", [[]]) or [[]])[0]]
 
 def set_header_if_blank(tab: str, header: list):
     service = get_sheets_service()
-    if not get_header(tab) or all(not safe_strip(x) for x in get_header(tab)):
+    existing = get_header(tab)
+    if (not existing) or all(not safe_strip(x) for x in existing):
         service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID,
             range=f"'{tab}'!A1",
@@ -110,10 +120,11 @@ def append_row(tab: str, data: dict):
     header = get_header(tab)
     if not header:
         raise ValueError(f"No header found in {tab}")
+
     row = [data.get(col, "") for col in header]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"'{tab}'!A:Z",
+        range=f"'{tab}'!A:ZZ",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": [row]},
@@ -128,10 +139,11 @@ def fetch_image_bytes(url: str) -> bytes:
         return r.read()
 
 # ────────────────────────────────────────────────
-# BoxID Logic – only boxNumber + Freezer_Inventory
+# BoxID Logic – maximum across Freezer_Inventory + boxNumber
 # ────────────────────────────────────────────────
 def get_max_boxid(df: pd.DataFrame) -> int:
-    if df.empty or "BoxID" not in df.columns: return 0
+    if df.empty or "BoxID" not in df.columns:
+        return 0
     nums = pd.to_numeric(df["BoxID"], errors="coerce").dropna()
     return int(nums.max()) if not nums.empty else 0
 
@@ -142,7 +154,7 @@ def current_max_boxid() -> int:
         try:
             df = read_tab(tab)
             mx = max(mx, get_max_boxid(df))
-        except:
+        except Exception:
             pass
     return mx
 
@@ -150,7 +162,7 @@ def resolve_boxid(choice: str) -> tuple[int, bool]:
     mx = current_max_boxid()
     if choice == "Open a new box":
         return mx + 1, True
-    else:  # "Use the previous box"
+    else:
         return max(mx, 1), False
 
 def show_new_box_reminder(boxid: int):
@@ -159,7 +171,7 @@ def show_new_box_reminder(boxid: int):
         <strong style="color:#1b5e20; font-size:1.3em;">New Box Created – Please Label:</strong><br><br>
         BoxID = <span style="font-size:1.8em; font-weight:bold;">{boxid}</span>
         </div>""",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 # ────────────────────────────────────────────────
@@ -167,7 +179,9 @@ def show_new_box_reminder(boxid: int):
 # ────────────────────────────────────────────────
 with st.sidebar:
     st.subheader("User")
-    st.session_state.user_name = st.text_input("Your name / initials", st.session_state.user_name.strip()).strip()
+    st.session_state.user_name = st.text_input(
+        "Your name / initials", st.session_state.user_name.strip()
+    ).strip()
 
     st.divider()
     st.subheader("View")
@@ -228,22 +242,28 @@ else:
 
 # ── LN Tank ──────────────────────────────────────
 if storage_type == "LN Tank":
-    set_header_if_blank(LN_TAB, ["TankID","RackNumber","BoxNumber","BoxUID","TubeNumber","TubeAmount","Memo","BoxID","QRCodeLink"])
+    set_header_if_blank(
+        LN_TAB,
+        ["TankID","RackNumber","BoxNumber","BoxUID","TubeNumber","TubeAmount","Memo","BoxID","QRCodeLink"],
+    )
 
     ln_df = read_tab(LN_TAB)
-    view = ln_df[ln_df["TankID"].str.upper() == tank.upper()] if "TankID" in ln_df else ln_df
+    view = (
+        ln_df[ln_df["TankID"].astype(str).str.upper() == tank.upper()]
+        if ("TankID" in ln_df.columns) else ln_df
+    )
 
     st.subheader(f"LN Tank – {tank}")
 
     with st.form("ln_add", clear_on_submit=True):
-        rack = st.selectbox("Rack", range(1,7))
+        rack = st.selectbox("Rack", range(1, 7))
         c1, c2 = st.columns(2)
         hiv  = c1.selectbox("HIV",  ["HIV+","HIV-"])
         drug = c2.selectbox("Drug", ["Cocaine","Cannabis","Poly","NON-DRUG"])
 
         box_choice = st.radio("BoxID", ["Use the previous box", "Open a new box"], horizontal=True)
         boxid, is_new = resolve_boxid(box_choice)
-        st.caption(f"Current max BoxID: **{current_max_boxid() or '—'}**")
+        st.caption(f"Current highest BoxID (boxNumber + Freezer_Inventory): **{current_max_boxid() or '—'}**")
         st.text_input("BoxID", str(boxid), disabled=True, key="ln_boxid")
 
         c3, c4 = st.columns(2)
@@ -253,27 +273,60 @@ if storage_type == "LN Tank":
         amount = st.number_input("Tube count", 0, step=1, value=1)
         memo   = st.text_area("Memo", height=90)
 
+        # --- BoxUID preview (robust)
+        prefix_str = f"{tank}-R{rack:02d}-{HIV_CODE[hiv]}-{DRUG_CODE[drug]}-"
+        seq = 1
         try:
-            prefix_str = f"{tank}-R{rack:02d}-{HIV_CODE[hiv]}-{DRUG_CODE[drug]}-"
-            seq = max((int(uid.split("-")[-1]) for uid in view["BoxUID"].astype(str) if uid.startswith(prefix_str)), default=0) + 1
+            if (not view.empty) and ("BoxUID" in view.columns):
+                nums = []
+                for uid in view["BoxUID"].astype(str):
+                    if uid.startswith(prefix_str):
+                        tail = uid.split("-")[-1]
+                        try:
+                            nums.append(int(tail))
+                        except Exception:
+                            pass
+                seq = (max(nums) + 1) if nums else 1
+
             box_uid = f"{prefix_str}{seq:02d}"
             st.info(f"→ BoxUID: **{box_uid}**")
             st.image(qr_url(box_uid), width=QR_PX)
-        except:
-            st.warning("Could not preview BoxUID")
+        except Exception as e:
+            box_uid = f"{prefix_str}{seq:02d}"
+            st.warning(f"Could not preview BoxUID (will still save as {box_uid}). Error: {e}")
 
         if st.form_submit_button("Save LN record", type="primary"):
             if not suffix:
                 st.error("Tube suffix required.")
             else:
                 try:
-                    box_uid = f"{prefix_str}{seq:02d}"   # re-compute to be safe
-                    qr_link = qr_url(box_uid)
+                    # Recompute seq on save from latest data (race-safe)
+                    ln_df_latest = read_tab(LN_TAB)
+                    view_latest = (
+                        ln_df_latest[ln_df_latest["TankID"].astype(str).str.upper() == tank.upper()]
+                        if ("TankID" in ln_df_latest.columns) else ln_df_latest
+                    )
+
+                    seq2 = 1
+                    if (not view_latest.empty) and ("BoxUID" in view_latest.columns):
+                        nums2 = []
+                        for uid in view_latest["BoxUID"].astype(str):
+                            if uid.startswith(prefix_str):
+                                tail = uid.split("-")[-1]
+                                try:
+                                    nums2.append(int(tail))
+                                except Exception:
+                                    pass
+                        seq2 = (max(nums2) + 1) if nums2 else 1
+
+                    box_uid2 = f"{prefix_str}{seq2:02d}"
+                    qr_link = qr_url(box_uid2)
+
                     row = {
                         "TankID": tank,
                         "RackNumber": rack,
                         "BoxNumber": f"{HIV_CODE[hiv]}-{DRUG_CODE[drug]}",
-                        "BoxUID": box_uid,
+                        "BoxUID": box_uid2,
                         "TubeNumber": f"{prefix} {suffix}",
                         "TubeAmount": amount,
                         "Memo": memo,
@@ -281,11 +334,13 @@ if storage_type == "LN Tank":
                         "QRCodeLink": qr_link,
                     }
                     append_row(LN_TAB, row)
-                    st.success(f"Saved → {box_uid} (BoxID {boxid})")
+
+                    st.success(f"Saved → {box_uid2} (BoxID {boxid})")
                     st.session_state.last_qr_link = qr_link
-                    st.session_state.last_qr_uid = box_uid
+                    st.session_state.last_qr_uid = box_uid2
                     if is_new:
                         show_new_box_reminder(boxid)
+
                 except Exception as e:
                     st.error(f"Save failed: {e}")
 
@@ -293,7 +348,7 @@ if storage_type == "LN Tank":
         try:
             png = fetch_image_bytes(st.session_state.last_qr_link)
             st.download_button("↓ Last QR", png, f"{st.session_state.last_qr_uid}.png", "image/png")
-        except:
+        except Exception:
             pass
 
     st.subheader(f"{tank} content")
@@ -329,7 +384,7 @@ else:
 
         box_choice = st.radio("BoxID", ["Use the previous box", "Open a new box"], horizontal=True, key="fz_choice")
         boxid, is_new = resolve_boxid(box_choice)
-        st.caption(f"Current max BoxID: **{current_max_boxid() or '—'}**")
+        st.caption(f"Current highest BoxID (boxNumber + Freezer_Inventory): **{current_max_boxid() or '—'}**")
         st.text_input("BoxID", str(boxid), disabled=True, key="fz_boxid")
 
         if st.form_submit_button("Save Freezer record", type="primary"):
@@ -370,5 +425,5 @@ st.subheader("Use_log (permanent record – view only)")
 try:
     ul = read_tab(USE_LOG_TAB)
     st.dataframe(ul, use_container_width=True, hide_index=True)
-except:
+except Exception:
     st.info("Use_log tab not readable or empty.")
