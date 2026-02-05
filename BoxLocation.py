@@ -4,9 +4,10 @@
 #
 # ✅ LN3:
 #   - Uses BoxLabel_group (NOT BoxNumber)
-#   - Required columns: TankID, BoxLabel_group, BoxID, TubeNumber, TubeAmount
+#   - Required columns: TankID, RackNumber, BoxLabel_group, BoxID, TubeNumber, TubeAmount
 #   - Add LN record: auto BoxUID + QR + BoxID option
 #   - Log Usage (LN): subtract TubeAmount; if 0 delete row; append to Use_log; append to session Final Report
+#   - Log Usage (LN) viewer: SHOW RackNumber BETWEEN TankID AND BoxLabel_group
 #
 # ✅ Freezer_Inventory (your schema):
 #   Columns:
@@ -22,7 +23,8 @@
 #
 # ✅ Use_log:
 #   - App does NOT overwrite existing non-blank header
-#   - Recommended header (if blank): StorageType, TankID, FreezerID, BoxLabel_group, BoxID,
+#   - Recommended header (if blank):
+#     StorageType, TankID, RackNumber, FreezerID, BoxLabel_group, BoxID,
 #     TubeNumber, Prefix, Tube suffix, Use, User, Time_stamp, ShippingTo, Memo
 #
 # ✅ Auto-clean on load:
@@ -54,7 +56,6 @@ if "last_qr_uid" not in st.session_state:
 if "usage_final_rows" not in st.session_state:
     st.session_state.usage_final_rows = []  # session final report (TubeAmount hidden)
 
-# Optional caches (kept)
 if "custom_boxlabel_groups" not in st.session_state:
     st.session_state.custom_boxlabel_groups = set()
 if "custom_prefixes" not in st.session_state:
@@ -225,18 +226,17 @@ def get_current_max_boxnumber_global() -> int:
     )
     """
     try:
-        df_box = read_tab(BOX_TAB)  # 'boxNumber'
+        df_box = read_tab(BOX_TAB)
     except Exception:
         df_box = pd.DataFrame()
 
     try:
-        df_fr = read_tab(FREEZER_TAB)  # 'Freezer_Inventory'
+        df_fr = read_tab(FREEZER_TAB)
     except Exception:
         df_fr = pd.DataFrame()
 
     max_boxnumber = get_max_numeric_in_column(df_box, "BoxNumber")
-    max_freezer_boxid = get_max_numeric_in_column(df_fr, BOXID_COL)  # "BoxID"
-
+    max_freezer_boxid = get_max_numeric_in_column(df_fr, BOXID_COL)
     return max(max_boxnumber, max_freezer_boxid, 0)
 
 def get_sheet_id(service, sheet_title: str) -> int:
@@ -313,7 +313,6 @@ def cleanup_zero_amount_rows(service, tab_name: str, df: pd.DataFrame, amount_co
         }
     } for idx0 in zero_idxs]
 
-    # Chunk to avoid oversized payloads
     chunk_size = 400
     for i in range(0, len(requests), chunk_size):
         service.spreadsheets().batchUpdate(
@@ -413,9 +412,11 @@ def ensure_freezer_header(service):
     set_header_if_blank(service, FREEZER_TAB, recommended)
 
 def ensure_use_log_header(service):
+    # ✅ RackNumber added here
     recommended = [
         "StorageType",
         "TankID",
+        "RackNumber",
         "FreezerID",
         "BoxLabel_group",
         "BoxID",
@@ -433,6 +434,7 @@ def ensure_use_log_header(service):
 def build_use_log_row(
     storage_type: str,
     tank_id: str,
+    rack_number: str,  # ✅ NEW
     freezer_id: str,
     box_label_group: str,
     boxid: str,
@@ -447,6 +449,7 @@ def build_use_log_row(
     return {
         "StorageType": safe_strip(storage_type),
         "TankID": safe_strip(tank_id).upper(),
+        "RackNumber": safe_strip(rack_number),
         "FreezerID": safe_strip(freezer_id).upper(),
         "BoxLabel_group": safe_strip(box_label_group),
         "BoxID": safe_strip(boxid),
@@ -501,7 +504,6 @@ def find_ln_row_index(ln_all_df: pd.DataFrame, tank_id: str, box_label_group: st
     df[TUBE_COL] = df[TUBE_COL].astype(str).map(normalize_spaces)
 
     tube_number_norm = normalize_spaces(tube_number)
-
     mask = (
         (df[TANK_COL] == safe_strip(tank_id).upper()) &
         (df[BOX_LABEL_COL] == safe_strip(box_label_group)) &
@@ -515,6 +517,16 @@ def find_ln_row_index(ln_all_df: pd.DataFrame, tank_id: str, box_label_group: st
     idx0 = int(hits.index[0])
     cur_amount = to_int_amount(hits.iloc[0].get(AMT_COL, 0), default=0)
     return idx0, cur_amount
+
+def get_ln_racknumber_by_index(ln_all_df: pd.DataFrame, idx0: int) -> str:
+    try:
+        if ln_all_df is None or ln_all_df.empty:
+            return ""
+        if RACK_COL not in ln_all_df.columns:
+            return ""
+        return safe_strip(ln_all_df.loc[idx0, RACK_COL])
+    except Exception:
+        return ""
 
 def find_freezer_row_index(fr_all_df: pd.DataFrame, freezer_id: str, box_label_group: str, boxid: str, prefix: str, suffix: str):
     if fr_all_df is None or fr_all_df.empty:
@@ -531,7 +543,6 @@ def find_freezer_row_index(fr_all_df: pd.DataFrame, freezer_id: str, box_label_g
     df[SUFFIX_COL] = df[SUFFIX_COL].astype(str).map(normalize_spaces)
 
     suffix_norm = normalize_spaces(suffix)
-
     mask = (
         (df[FREEZER_COL] == safe_strip(freezer_id).upper()) &
         (df[BOX_LABEL_COL] == safe_strip(box_label_group)) &
@@ -546,7 +557,6 @@ def find_freezer_row_index(fr_all_df: pd.DataFrame, freezer_id: str, box_label_g
     idx0 = int(hits.index[0])
     cur_amount = to_int_amount(hits.iloc[0].get(AMT_COL, 0), default=0)
     return idx0, cur_amount
-
 
 # ============================================================
 # Sidebar (Global Controls)
@@ -568,7 +578,6 @@ with st.sidebar:
 
     STORAGE_ID = selected_tank if STORAGE_TYPE == "LN Tank" else selected_freezer
     st.caption(f"Spreadsheet: {SPREADSHEET_ID[:10]}...")
-
 
 # ============================================================
 # 1) BOX LOCATION
@@ -609,7 +618,6 @@ except Exception as e:
     st.error("Unexpected error (Box Location)")
     st.code(str(e), language="text")
 
-
 # ============================================================
 # 2) Services + headers
 # ============================================================
@@ -617,7 +625,6 @@ service = sheets_service()
 ensure_use_log_header(service)
 ensure_ln_header(service)
 ensure_freezer_header(service)
-
 
 # ============================================================
 # 3) Use_log viewer (always visible)
@@ -633,7 +640,6 @@ try:
         st.dataframe(use_log_df.tail(n), use_container_width=True, hide_index=True)
 except Exception as e:
     st.warning(f"Unable to read Use_log: {e}")
-
 
 # ============================================================
 # 4) LN MODULE
@@ -797,16 +803,16 @@ else:
 
     # ---------- Log Usage (LN) ----------
     st.subheader("📉 Log Usage (LN) — subtract TubeAmount + append Final Report")
-
     if ln_all_df is None or ln_all_df.empty:
         st.info("LN3 is empty — nothing to log.")
     else:
-        needed = {TANK_COL, BOX_LABEL_COL, BOXID_COL, TUBE_COL, AMT_COL}
+        needed = {TANK_COL, RACK_COL, BOX_LABEL_COL, BOXID_COL, TUBE_COL, AMT_COL}
         if not needed.issubset(set(ln_all_df.columns)):
             st.error(f"LN3 must include columns: {', '.join(sorted(list(needed)))}")
         else:
             dfv = ln_all_df.copy()
             dfv[TANK_COL] = dfv[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
+            dfv[RACK_COL] = dfv[RACK_COL].astype(str).map(safe_strip)
             dfv[BOX_LABEL_COL] = dfv[BOX_LABEL_COL].astype(str).map(safe_strip)
             dfv[BOXID_COL] = dfv[BOXID_COL].astype(str).map(safe_strip)
             dfv[TUBE_COL] = dfv[TUBE_COL].astype(str).map(normalize_spaces)
@@ -844,7 +850,8 @@ else:
             if match_df.empty:
                 st.info("No matching record yet.")
             else:
-                show_cols = [c for c in [TANK_COL, BOX_LABEL_COL, BOXID_COL, TUBE_COL, AMT_COL, MEMO_COL] if c in match_df.columns]
+                # ✅ SHOW RackNumber BETWEEN TankID and BoxLabel_group
+                show_cols = [c for c in [TANK_COL, RACK_COL, BOX_LABEL_COL, BOXID_COL, TUBE_COL, AMT_COL, MEMO_COL] if c in match_df.columns]
                 st.dataframe(match_df[show_cols], use_container_width=True, hide_index=True)
 
             with st.form("ln_usage_submit"):
@@ -877,12 +884,16 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
                         st.stop()
 
+                    rack_number = get_ln_racknumber_by_index(ln_all_df, idx0)
+
+                    # ✅ Append to Use_log INCLUDING RackNumber
                     append_row_by_header(
                         service,
                         USE_LOG_TAB,
                         build_use_log_row(
                             storage_type="LN",
                             tank_id=chosen_tank,
+                            rack_number=rack_number,
                             freezer_id="",
                             box_label_group=chosen_box,
                             boxid=chosen_boxid,
@@ -895,6 +906,7 @@ else:
                         ),
                     )
 
+                    # Update/delete LN3
                     if new_amount == 0:
                         delete_row_by_index(service, LN_TAB, idx0)
                         st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN3 row deleted.")
@@ -902,6 +914,7 @@ else:
                         update_amount_by_index(service, LN_TAB, idx0, AMT_COL, new_amount)
                         st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
+                    # Session Final Report
                     ts = now_timestamp_str()
                     st.session_state.usage_final_rows.append(
                         build_final_report_row(
@@ -919,7 +932,6 @@ else:
                         )
                     )
                     st.rerun()
-
 
 # ============================================================
 # 5) FREEZER MODULE (Manual Full Fields + Duplicate check + BoxID global rule)
@@ -960,7 +972,6 @@ else:
     default_freezer_id = safe_strip(selected_freezer).upper()
     default_date = today_str_ny()
 
-    # BoxID rule: global max across boxNumber[BoxNumber] and Freezer_Inventory[BoxID]
     current_max_boxnumber = get_current_max_boxnumber_global()
     st.caption(
         f"Current max BoxNumber/BoxID (boxNumber[BoxNumber] + Freezer_Inventory[BoxID]): "
@@ -1013,7 +1024,6 @@ else:
             if not tube_suffix:
                 st.error("Tube suffix is required."); st.stop()
 
-            # (Optional safety) ensure BoxID equals rule-derived expectation
             expected_boxid = max(current_max_boxnumber, 1) if box_choice == "Use the previous box" else (max(current_max_boxnumber, 0) + 1)
             if int(boxid) != int(expected_boxid):
                 st.error("BoxID mismatch. Please re-select BoxID option."); st.stop()
@@ -1172,12 +1182,14 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
                         st.stop()
 
+                    # ✅ Append to Use_log (RackNumber blank for Freezer)
                     append_row_by_header(
                         service,
                         USE_LOG_TAB,
                         build_use_log_row(
                             storage_type="Freezer",
                             tank_id="",
+                            rack_number="",
                             freezer_id=chosen_freezer,
                             box_label_group=chosen_box,
                             boxid=chosen_boxid,
@@ -1214,7 +1226,6 @@ else:
                         )
                     )
                     st.rerun()
-
 
 # ============================================================
 # 6) Final Report (combined; TubeAmount hidden; Use shown)
