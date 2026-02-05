@@ -29,6 +29,11 @@
 #
 # ✅ Auto-clean on load:
 #   - After loading LN3 / Freezer_Inventory, delete rows where TubeAmount == 0
+#
+# ✅ Final report download:
+#   - Button label stays: "⬇️ Download the session final report CSV"
+#   - Download file is Excel: shippingList + ShippingTo + TodayDate(YYYYMMDD).xlsx
+#     (If multiple ShippingTo values exist: uses MULTI)
 # ============================================================
 
 import re
@@ -36,6 +41,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import Tuple
+from io import BytesIO
 
 import pandas as pd
 import pytz
@@ -163,6 +169,14 @@ def fetch_bytes(url: str, timeout: int = 10) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+def safe_filename_component(s: str, default: str = "Unknown") -> str:
+    s = safe_strip(s)
+    if not s:
+        s = default
+    s = re.sub(r'[\\/:*?"<>|]+', "_", s)
+    s = re.sub(r"\s+", "_", s).strip("_")
+    return s or default
 
 def read_tab(tab_name: str) -> pd.DataFrame:
     svc = sheets_service()
@@ -412,7 +426,6 @@ def ensure_freezer_header(service):
     set_header_if_blank(service, FREEZER_TAB, recommended)
 
 def ensure_use_log_header(service):
-    # ✅ RackNumber added here
     recommended = [
         "StorageType",
         "TankID",
@@ -434,7 +447,7 @@ def ensure_use_log_header(service):
 def build_use_log_row(
     storage_type: str,
     tank_id: str,
-    rack_number: str,  # ✅ NEW
+    rack_number: str,
     freezer_id: str,
     box_label_group: str,
     boxid: str,
@@ -790,6 +803,7 @@ else:
         ln_all_df = read_tab(LN_TAB)
     except Exception:
         ln_all_df = pd.DataFrame()
+
     ln_view_df = ln_all_df.copy()
     if not ln_view_df.empty and TANK_COL in ln_view_df.columns:
         ln_view_df[TANK_COL] = ln_view_df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
@@ -850,7 +864,6 @@ else:
             if match_df.empty:
                 st.info("No matching record yet.")
             else:
-                # ✅ SHOW RackNumber BETWEEN TankID and BoxLabel_group
                 show_cols = [c for c in [TANK_COL, RACK_COL, BOX_LABEL_COL, BOXID_COL, TUBE_COL, AMT_COL, MEMO_COL] if c in match_df.columns]
                 st.dataframe(match_df[show_cols], use_container_width=True, hide_index=True)
 
@@ -886,7 +899,6 @@ else:
 
                     rack_number = get_ln_racknumber_by_index(ln_all_df, idx0)
 
-                    # ✅ Append to Use_log INCLUDING RackNumber
                     append_row_by_header(
                         service,
                         USE_LOG_TAB,
@@ -906,7 +918,6 @@ else:
                         ),
                     )
 
-                    # Update/delete LN3
                     if new_amount == 0:
                         delete_row_by_index(service, LN_TAB, idx0)
                         st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN3 row deleted.")
@@ -914,7 +925,6 @@ else:
                         update_amount_by_index(service, LN_TAB, idx0, AMT_COL, new_amount)
                         st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
-                    # Session Final Report
                     ts = now_timestamp_str()
                     st.session_state.usage_final_rows.append(
                         build_final_report_row(
@@ -947,7 +957,6 @@ else:
     except Exception:
         fr_all_df = pd.DataFrame()
 
-    # ✅ Auto-clean on load
     try:
         if cleanup_zero_amount_rows(service, FREEZER_TAB, fr_all_df, AMT_COL):
             st.info("🧹 Auto-clean: removed Freezer_Inventory row(s) where TubeAmount was 0.")
@@ -966,7 +975,6 @@ else:
     else:
         st.dataframe(fr_view_df, use_container_width=True, hide_index=True)
 
-    # ---------- AddFreezer Inventory Record (Manual / Full Fields) ----------
     st.subheader("➕ AddFreezer Inventory Record (Manual / Full Fields)")
 
     default_freezer_id = safe_strip(selected_freezer).upper()
@@ -1043,7 +1051,6 @@ else:
                 MEMO_COL: memo,
             }
 
-            # ✅ Duplicate check: same FreezerID/BoxLabel_group/BoxID/Prefix/Tube suffix
             def _norm(s: str) -> str:
                 return normalize_spaces(s)
 
@@ -1054,8 +1061,8 @@ else:
             key_suffix = _norm(tube_suffix)
 
             if fr_all_df is not None and (not fr_all_df.empty):
-                needed = {FREEZER_COL, BOX_LABEL_COL, BOXID_COL, PREFIX_COL, SUFFIX_COL}
-                if needed.issubset(set(fr_all_df.columns)):
+                needed_cols = {FREEZER_COL, BOX_LABEL_COL, BOXID_COL, PREFIX_COL, SUFFIX_COL}
+                if needed_cols.issubset(set(fr_all_df.columns)):
                     dfchk = fr_all_df.copy()
                     dfchk[FREEZER_COL] = dfchk[FREEZER_COL].astype(str).map(lambda x: _norm(x).upper())
                     dfchk[BOX_LABEL_COL] = dfchk[BOX_LABEL_COL].astype(str).map(_norm)
@@ -1091,13 +1098,11 @@ else:
                 st.error("Failed to save Freezer_Inventory record")
                 st.code(str(e), language="text")
 
-    # Refresh freezer frames
     try:
         fr_all_df = read_tab(FREEZER_TAB)
     except Exception:
         fr_all_df = pd.DataFrame()
 
-    # ---------- Log Usage (Freezer) ----------
     st.subheader("📉 Log Usage (Freezer) — subtract TubeAmount + append Final Report")
 
     if fr_all_df is None or fr_all_df.empty:
@@ -1182,7 +1187,6 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
                         st.stop()
 
-                    # ✅ Append to Use_log (RackNumber blank for Freezer)
                     append_row_by_header(
                         service,
                         USE_LOG_TAB,
@@ -1251,13 +1255,26 @@ if st.session_state.usage_final_rows:
     final_df = pd.DataFrame(st.session_state.usage_final_rows).reindex(columns=final_cols, fill_value="")
     st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-    csv_bytes = final_df.to_csv(index=False).encode("utf-8")
+    # ✅ Determine ShippingTo for filename
+    ship_vals = [safe_strip(x) for x in final_df.get("ShippingTo", pd.Series([], dtype=str)).tolist() if safe_strip(x)]
+    unique_ship = sorted(set(ship_vals))
+    shipping_to_for_file = unique_ship[0] if len(unique_ship) == 1 else "MULTI"
+    shipping_to_for_file = safe_filename_component(shipping_to_for_file, default="MULTI")
+    today_for_file = datetime.now(NY_TZ).strftime("%Y%m%d")
+
+    # ✅ Export to Excel bytes
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        final_df.to_excel(writer, index=False, sheet_name="FinalReport")
+    xlsx_bytes = output.getvalue()
+
+    # ✅ Button label unchanged, file is .xlsx
     st.download_button(
-        "⬇️ Download session final report CSV",
-        data=csv_bytes,
-        file_name="final_report_session.csv",
-        mime="text/csv",
-        key="download_final_report",
+        "⬇️ Download the session final report CSV",
+        data=xlsx_bytes,
+        file_name=f"shippingList{shipping_to_for_file}{today_for_file}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_final_report_xlsx",
     )
 
     if st.button("🧹 Clear session final report", key="clear_final_report"):
