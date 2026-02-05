@@ -2,14 +2,33 @@
 # ============================================================
 # Box Location + LN Inventory (LN3 multi-tank) + Freezer Inventory + Use_log + Final Report
 #
-# ✅ Final report download:
-#   - Button label stays: "⬇️ Download the session final report CSV"
-#   - Download file is Excel: shippingList + ShippingTo + TodayDate(YYYYMMDD).xlsx
-#   - IMPORTANT: Streamlit Cloud may NOT have openpyxl installed.
-#     This code auto-chooses:
-#       1) xlsxwriter (preferred if installed)
-#       2) openpyxl (fallback)
-#     If neither exists, it falls back to CSV with the same naming pattern ('.csv').
+# ✅ LN3:
+#   - Uses BoxLabel_group (NOT BoxNumber)
+#   - Required columns: TankID, RackNumber, BoxLabel_group, BoxID, TubeNumber, TubeAmount
+#   - Add LN record: auto BoxUID + QR + BoxID option
+#   - Log Usage (LN): subtract TubeAmount; if 0 delete row; append to Use_log; append to session Final Report
+#   - Log Usage (LN) viewer: SHOW RackNumber BETWEEN TankID AND BoxLabel_group
+#
+# ✅ Freezer_Inventory (your schema):
+#   Columns:
+#   FreezerID, BoxID, Prefix, Tube suffix, TubeAmount, Date Collected, BoxLabel_group,
+#   Samples Received, Missing, Urine Results, Collected By, Memo
+#   - AddFreezer Inventory Record:
+#       BoxID option:
+#         1) Use the previous box = current_max_boxnumber
+#         2) Open a new box = current_max_boxnumber + 1
+#       where current_max_boxnumber = max( boxNumber[BoxNumber], Freezer_Inventory[BoxID] )
+#   - Duplicate check (same FreezerID/BoxLabel_group/BoxID/Prefix/Tube suffix)
+#   - Log Usage (Freezer): subtract TubeAmount; if 0 delete row; append to Use_log; append to session Final Report
+#
+# ✅ Use_log:
+#   - App does NOT overwrite existing non-blank header
+#   - Recommended header (if blank):
+#     StorageType, TankID, RackNumber, FreezerID, BoxLabel_group, BoxID,
+#     TubeNumber, Prefix, Tube suffix, Use, User, Time_stamp, ShippingTo, Memo
+#
+# ✅ Auto-clean on load:
+#   - After loading LN3 / Freezer_Inventory, delete rows where TubeAmount == 0
 # ============================================================
 
 import re
@@ -17,7 +36,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import Tuple
-from io import BytesIO
 
 import pandas as pd
 import pytz
@@ -145,40 +163,6 @@ def fetch_bytes(url: str, timeout: int = 10) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
-
-def safe_filename_component(s: str, default: str = "Unknown") -> str:
-    s = safe_strip(s)
-    if not s:
-        s = default
-    s = re.sub(r'[\\/:*?"<>|]+', "_", s)
-    s = re.sub(r"\s+", "_", s).strip("_")
-    return s or default
-
-def pick_excel_engine() -> str | None:
-    """
-    Streamlit Cloud often lacks openpyxl.
-    Prefer xlsxwriter if available; otherwise openpyxl.
-    """
-    try:
-        import xlsxwriter  # noqa: F401
-        return "xlsxwriter"
-    except Exception:
-        pass
-    try:
-        import openpyxl  # noqa: F401
-        return "openpyxl"
-    except Exception:
-        return None
-
-def export_df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "FinalReport") -> bytes | None:
-    engine = pick_excel_engine()
-    if engine is None:
-        return None
-    output = BytesIO()
-    # NOTE: this will work with xlsxwriter even if openpyxl is missing
-    with pd.ExcelWriter(output, engine=engine) as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    return output.getvalue()
 
 def read_tab(tab_name: str) -> pd.DataFrame:
     svc = sheets_service()
@@ -428,6 +412,7 @@ def ensure_freezer_header(service):
     set_header_if_blank(service, FREEZER_TAB, recommended)
 
 def ensure_use_log_header(service):
+    # ✅ RackNumber added here
     recommended = [
         "StorageType",
         "TankID",
@@ -449,7 +434,7 @@ def ensure_use_log_header(service):
 def build_use_log_row(
     storage_type: str,
     tank_id: str,
-    rack_number: str,
+    rack_number: str,  # ✅ NEW
     freezer_id: str,
     box_label_group: str,
     boxid: str,
@@ -670,6 +655,7 @@ else:
     except Exception:
         ln_all_df = pd.DataFrame()
 
+    # ✅ Auto-clean on load (LN3)
     try:
         if cleanup_zero_amount_rows(service, LN_TAB, ln_all_df, AMT_COL):
             st.info("🧹 Auto-clean: removed LN3 row(s) where TubeAmount was 0.")
@@ -682,6 +668,7 @@ else:
         ln_view_df[TANK_COL] = ln_view_df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
         ln_view_df = ln_view_df[ln_view_df[TANK_COL] == safe_strip(selected_tank).upper()].copy()
 
+    # ---------- Add LN Record ----------
     st.subheader("➕ Add LN Record")
     with st.form("ln_add", clear_on_submit=True):
         rack = st.selectbox("RackNumber", [1, 2, 3, 4, 5, 6], index=0)
@@ -784,6 +771,7 @@ else:
                 st.error("Failed to save LN record")
                 st.code(str(e), language="text")
 
+    # Download last QR
     if st.session_state.last_qr_link:
         try:
             png_bytes = fetch_bytes(st.session_state.last_qr_link)
@@ -797,11 +785,11 @@ else:
         except Exception as e:
             st.warning(f"Saved, but QR download failed: {e}")
 
+    # Refresh view after rerun
     try:
         ln_all_df = read_tab(LN_TAB)
     except Exception:
         ln_all_df = pd.DataFrame()
-
     ln_view_df = ln_all_df.copy()
     if not ln_view_df.empty and TANK_COL in ln_view_df.columns:
         ln_view_df[TANK_COL] = ln_view_df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
@@ -813,6 +801,7 @@ else:
     else:
         st.dataframe(ln_view_df, use_container_width=True, hide_index=True)
 
+    # ---------- Log Usage (LN) ----------
     st.subheader("📉 Log Usage (LN) — subtract TubeAmount + append Final Report")
     if ln_all_df is None or ln_all_df.empty:
         st.info("LN3 is empty — nothing to log.")
@@ -861,6 +850,7 @@ else:
             if match_df.empty:
                 st.info("No matching record yet.")
             else:
+                # ✅ SHOW RackNumber BETWEEN TankID and BoxLabel_group
                 show_cols = [c for c in [TANK_COL, RACK_COL, BOX_LABEL_COL, BOXID_COL, TUBE_COL, AMT_COL, MEMO_COL] if c in match_df.columns]
                 st.dataframe(match_df[show_cols], use_container_width=True, hide_index=True)
 
@@ -896,6 +886,7 @@ else:
 
                     rack_number = get_ln_racknumber_by_index(ln_all_df, idx0)
 
+                    # ✅ Append to Use_log INCLUDING RackNumber
                     append_row_by_header(
                         service,
                         USE_LOG_TAB,
@@ -915,6 +906,7 @@ else:
                         ),
                     )
 
+                    # Update/delete LN3
                     if new_amount == 0:
                         delete_row_by_index(service, LN_TAB, idx0)
                         st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN3 row deleted.")
@@ -922,6 +914,7 @@ else:
                         update_amount_by_index(service, LN_TAB, idx0, AMT_COL, new_amount)
                         st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
+                    # Session Final Report
                     ts = now_timestamp_str()
                     st.session_state.usage_final_rows.append(
                         build_final_report_row(
@@ -954,6 +947,7 @@ else:
     except Exception:
         fr_all_df = pd.DataFrame()
 
+    # ✅ Auto-clean on load
     try:
         if cleanup_zero_amount_rows(service, FREEZER_TAB, fr_all_df, AMT_COL):
             st.info("🧹 Auto-clean: removed Freezer_Inventory row(s) where TubeAmount was 0.")
@@ -972,6 +966,7 @@ else:
     else:
         st.dataframe(fr_view_df, use_container_width=True, hide_index=True)
 
+    # ---------- AddFreezer Inventory Record (Manual / Full Fields) ----------
     st.subheader("➕ AddFreezer Inventory Record (Manual / Full Fields)")
 
     default_freezer_id = safe_strip(selected_freezer).upper()
@@ -1048,6 +1043,7 @@ else:
                 MEMO_COL: memo,
             }
 
+            # ✅ Duplicate check: same FreezerID/BoxLabel_group/BoxID/Prefix/Tube suffix
             def _norm(s: str) -> str:
                 return normalize_spaces(s)
 
@@ -1058,8 +1054,8 @@ else:
             key_suffix = _norm(tube_suffix)
 
             if fr_all_df is not None and (not fr_all_df.empty):
-                needed_cols = {FREEZER_COL, BOX_LABEL_COL, BOXID_COL, PREFIX_COL, SUFFIX_COL}
-                if needed_cols.issubset(set(fr_all_df.columns)):
+                needed = {FREEZER_COL, BOX_LABEL_COL, BOXID_COL, PREFIX_COL, SUFFIX_COL}
+                if needed.issubset(set(fr_all_df.columns)):
                     dfchk = fr_all_df.copy()
                     dfchk[FREEZER_COL] = dfchk[FREEZER_COL].astype(str).map(lambda x: _norm(x).upper())
                     dfchk[BOX_LABEL_COL] = dfchk[BOX_LABEL_COL].astype(str).map(_norm)
@@ -1095,11 +1091,13 @@ else:
                 st.error("Failed to save Freezer_Inventory record")
                 st.code(str(e), language="text")
 
+    # Refresh freezer frames
     try:
         fr_all_df = read_tab(FREEZER_TAB)
     except Exception:
         fr_all_df = pd.DataFrame()
 
+    # ---------- Log Usage (Freezer) ----------
     st.subheader("📉 Log Usage (Freezer) — subtract TubeAmount + append Final Report")
 
     if fr_all_df is None or fr_all_df.empty:
@@ -1184,6 +1182,7 @@ else:
                         st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
                         st.stop()
 
+                    # ✅ Append to Use_log (RackNumber blank for Freezer)
                     append_row_by_header(
                         service,
                         USE_LOG_TAB,
@@ -1252,34 +1251,14 @@ if st.session_state.usage_final_rows:
     final_df = pd.DataFrame(st.session_state.usage_final_rows).reindex(columns=final_cols, fill_value="")
     st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-    ship_vals = [safe_strip(x) for x in final_df.get("ShippingTo", pd.Series([], dtype=str)).tolist() if safe_strip(x)]
-    unique_ship = sorted(set(ship_vals))
-    shipping_to_for_file = unique_ship[0] if len(unique_ship) == 1 else "MULTI"
-    shipping_to_for_file = safe_filename_component(shipping_to_for_file, default="MULTI")
-    today_for_file = datetime.now(NY_TZ).strftime("%Y%m%d")
-
-    # ✅ Excel bytes (xlsxwriter -> openpyxl -> fallback to CSV)
-    xlsx_bytes = export_df_to_excel_bytes(final_df, sheet_name="FinalReport")
-
-    if xlsx_bytes is not None:
-        st.download_button(
-            "⬇️ Download the session final report CSV",
-            data=xlsx_bytes,
-            file_name=f"shippingList{shipping_to_for_file}{today_for_file}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_final_report_xlsx",
-        )
-    else:
-        # Fallback: CSV if neither xlsxwriter nor openpyxl is installed
-        csv_bytes = final_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Download the session final report CSV",
-            data=csv_bytes,
-            file_name=f"shippingList{shipping_to_for_file}{today_for_file}.csv",
-            mime="text/csv",
-            key="download_final_report_csv_fallback",
-        )
-        st.warning("Excel engine not installed (xlsxwriter/openpyxl). Downloaded as CSV instead.")
+    csv_bytes = final_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download session final report CSV",
+        data=csv_bytes,
+        file_name="final_report_session.csv",
+        mime="text/csv",
+        key="download_final_report",
+    )
 
     if st.button("🧹 Clear session final report", key="clear_final_report"):
         st.session_state.usage_final_rows = []
