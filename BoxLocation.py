@@ -966,6 +966,53 @@ else:
     else:
         st.dataframe(fr_view_df, use_container_width=True, hide_index=True)
 
+    # ============================================================
+    # NEW) Search Freezer_Inventory by BoxLabel_group
+    # ============================================================
+    st.subheader("🔎 Search Freezer_Inventory by BoxLabel_group")
+
+    if fr_all_df is None or fr_all_df.empty:
+        st.info("Freezer_Inventory is empty.")
+    elif BOX_LABEL_COL not in fr_all_df.columns:
+        st.error(f"Missing column '{BOX_LABEL_COL}' in {FREEZER_TAB}.")
+    else:
+        df_search = fr_all_df.copy()
+
+        # scope to selected freezer
+        if FREEZER_COL in df_search.columns:
+            df_search[FREEZER_COL] = df_search[FREEZER_COL].astype(str).map(lambda x: safe_strip(x).upper())
+            df_search = df_search[df_search[FREEZER_COL] == safe_strip(selected_freezer).upper()].copy()
+
+        df_search[BOX_LABEL_COL] = df_search[BOX_LABEL_COL].astype(str).map(safe_strip)
+
+        groups = sorted([g for g in df_search[BOX_LABEL_COL].dropna().unique().tolist() if safe_strip(g)])
+
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            mode = st.radio("Mode", ["Exact (dropdown)", "Contains (text)"], horizontal=True, key="fr_search_mode")
+
+        if mode == "Exact (dropdown)":
+            chosen_group = st.selectbox("BoxLabel_group", ["(select)"] + groups, key="fr_search_group_exact")
+            if chosen_group == "(select)":
+                st.info("Select a BoxLabel_group to view matching rows.")
+            else:
+                out = df_search[df_search[BOX_LABEL_COL] == safe_strip(chosen_group)].copy()
+                st.caption(f"Matches: {len(out)}")
+                st.dataframe(out, use_container_width=True, hide_index=True)
+        else:
+            q = st.text_input(
+                "BoxLabel_group contains…",
+                placeholder="e.g., HP-COC",
+                key="fr_search_group_contains",
+            ).strip()
+            if not q:
+                st.info("Type a search term to filter.")
+            else:
+                qn = safe_strip(q).lower()
+                out = df_search[df_search[BOX_LABEL_COL].astype(str).str.lower().str.contains(qn, na=False)].copy()
+                st.caption(f"Matches: {len(out)}")
+                st.dataframe(out, use_container_width=True, hide_index=True)
+
     # ---------- AddFreezer Inventory Record (Manual / Full Fields) ----------
     st.subheader("➕ AddFreezer Inventory Record (Manual / Full Fields)")
 
