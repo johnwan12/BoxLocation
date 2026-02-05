@@ -139,23 +139,48 @@ def fetch_image_bytes(url: str) -> bytes:
         return r.read()
 
 # ────────────────────────────────────────────────
-# BoxID Logic – maximum across Freezer_Inventory + boxNumber
+# BoxID Logic – robust detection (BoxID / Box ID / boxid, etc.)
 # ────────────────────────────────────────────────
+def find_boxid_col(df: pd.DataFrame) -> str | None:
+    if df.empty:
+        return None
+
+    # Normalize: lower + strip + remove spaces
+    norm = {c: safe_strip(c).lower().replace(" ", "") for c in df.columns}
+
+    # Common variants
+    candidates = {"boxid", "box_id", "boxid#", "boxidnum", "boxidentifier"}
+
+    for original, n in norm.items():
+        if n in candidates:
+            return original
+
+    # Also accept if removing underscores yields boxid
+    for original, n in norm.items():
+        if n.replace("_", "") == "boxid":
+            return original
+
+    return None
+
 def get_max_boxid(df: pd.DataFrame) -> int:
-    if df.empty or "BoxID" not in df.columns:
+    col = find_boxid_col(df)
+    if not col:
         return 0
-    nums = pd.to_numeric(df["BoxID"], errors="coerce").dropna()
+
+    s = df[col].astype(str).str.strip()
+
+    # Extract first integer from cells like "12", "BoxID 12", "12 (new)"
+    extracted = s.str.extract(r"(\d+)", expand=False)
+    nums = pd.to_numeric(extracted, errors="coerce").dropna()
+
     return int(nums.max()) if not nums.empty else 0
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=5)
 def current_max_boxid() -> int:
     mx = 0
     for tab in [BOX_TAB, FREEZER_TAB]:
-        try:
-            df = read_tab(tab)
-            mx = max(mx, get_max_boxid(df))
-        except Exception:
-            pass
+        df = read_tab(tab)
+        mx = max(mx, get_max_boxid(df))
     return mx
 
 def resolve_boxid(choice: str) -> tuple[int, bool]:
@@ -163,7 +188,8 @@ def resolve_boxid(choice: str) -> tuple[int, bool]:
     if choice == "Open a new box":
         return mx + 1, True
     else:
-        return max(mx, 1), False
+        # If nothing found yet, start at 1; otherwise use the max
+        return (mx if mx > 0 else 1), False
 
 def show_new_box_reminder(boxid: int):
     st.markdown(
@@ -228,6 +254,15 @@ except Exception as e:
 st.divider()
 st.header("🧊 Storage")
 
+# Debug (optional but useful)
+with st.expander("🔎 Debug BoxID max (boxNumber + Freezer_Inventory)", expanded=False):
+    for tab in [BOX_TAB, FREEZER_TAB]:
+        d = read_tab(tab)
+        col = find_boxid_col(d)
+        st.write(tab, "columns =", list(d.columns))
+        st.write(tab, "detected BoxID column =", col)
+        st.write(tab, "max BoxID =", get_max_boxid(d))
+
 # Session usage preview
 st.subheader("Session Final Usage Report")
 if st.session_state.usage_final_rows:
@@ -273,7 +308,7 @@ if storage_type == "LN Tank":
         amount = st.number_input("Tube count", 0, step=1, value=1)
         memo   = st.text_area("Memo", height=90)
 
-        # --- BoxUID preview (robust)
+        # --- BoxUID preview (robust, no undefined vars)
         prefix_str = f"{tank}-R{rack:02d}-{HIV_CODE[hiv]}-{DRUG_CODE[drug]}-"
         seq = 1
         try:
