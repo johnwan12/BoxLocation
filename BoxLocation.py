@@ -1,21 +1,29 @@
-# BoxLocation.py — Full Streamlit App
+# BoxLocation.py — Full Streamlit App (UPDATED)
 # Box Location + LN Inventory (multi-tank) + Use_log
 #
-# ✅ Includes:
-# - Box Location viewer + StudyID -> BoxNumber lookup
+# ✅ Updates per your latest headers:
+# - LN3: "BoxNumber" renamed to "BoxLabel_group"
+# - Use_log: REMOVE columns RackNumber, BoxNumber, BoxUID
+#   Use_log expected columns:
+#     TankID | BoxLabel_group | BoxID | TubeNumber | Use | User | Time_stamp | ShippingTo | Memo
+#
+# ✅ Features:
+# - Box Location viewer + StudyID -> BoxNumber lookup (from separate 'boxNumber' tab)
 # - LN3 inventory (multi-tank via TankID column)
-# - Add LN record (creates BoxUID + QR, appends to LN3)
-# - ✅ Auto-clean on load: deletes any LN3 rows where TubeAmount == 0
+# - Add LN record (auto BoxUID + QR, append to LN3)
+# - ✅ Auto-clean on load: delete LN3 rows where TubeAmount == 0
 # - Use_log viewer
-# - ✅ Log Usage (LN) block (TankID | BoxLabel_group | BoxID | Prefix | Tube suffix | Use | User | Time_stamp | ShippingTo | Memo)
-#   - Shows TubeAmount in "Current matching record(s)"
-#   - Final report hides TubeAmount, shows Use
-#   - Subtracts Use from TubeAmount; if becomes 0, deletes LN3 row
+# - ✅ Log Usage (LN) block:
+#     TankID(pulldown) | BoxLabel_group(pulldown) | BoxID(pulldown) | Prefix(pulldown) | Tube suffix(pulldown)
+#     User enters Use, User, ShippingTo, Memo
+#   - Current matching record(s): SHOW TubeAmount
+#   - Final report: HIDE TubeAmount, show Use
+#   - Subtract Use from TubeAmount; if becomes 0 -> DELETE LN3 row
 #
 # IMPORTANT:
-# - If your existing Use_log tab already has a non-blank header row, this code will NOT overwrite it.
-#   You MUST manually add "TankID" (recommended FIRST column) to Use_log row 1 if missing.
-# - LN3 should include TankID + BoxID + TubeAmount columns for safe multi-tank usage.
+# - If LN3 / Use_log already have non-blank header rows, code won't overwrite them.
+# - Make sure LN3 header row includes at least:
+#   TankID, RackNumber, BoxLabel_group, BoxUID, TubeNumber, TubeAmount, Memo, BoxID, QRCodeLink
 
 import re
 import urllib.parse
@@ -40,7 +48,7 @@ if "last_qr_link" not in st.session_state:
 if "last_qr_uid" not in st.session_state:
     st.session_state.last_qr_uid = ""
 if "usage_final_rows" not in st.session_state:
-    st.session_state.usage_final_rows = []  # session report (TubeAmount hidden)
+    st.session_state.usage_final_rows = []  # session final report (TubeAmount hidden)
 
 # -------------------- Constants --------------------
 DISPLAY_TABS = ["Cocaine", "Cannabis", "HIV-neg-nondrug", "HIV+nondrug"]
@@ -50,11 +58,37 @@ TAB_MAP = {
     "HIV-neg-nondrug": "HIV-neg-nondrug",
     "HIV+nondrug": "HIV+nondrug",
 }
+
+# Box lookup tab (separate from LN3)
 BOX_TAB = "boxNumber"
 
-# Inventory tab for ALL LN tanks
-LN_TAB = "LN3"          # your existing LN tab name
-USE_LOG_TAB = "Use_log" # usage audit tab
+# LN inventory + Use_log tabs
+LN_TAB = "LN3"
+USE_LOG_TAB = "Use_log"
+
+# ✅ LN3 column name: BoxLabel_group (replaces BoxNumber)
+TANK_COL = "TankID"
+RACK_COL = "RackNumber"
+BOX_COL = "BoxLabel_group"
+BOXUID_COL = "BoxUID"
+TUBE_COL = "TubeNumber"
+AMT_COL = "TubeAmount"
+MEMO_COL = "Memo"
+BOXID_COL = "BoxID"
+QR_COL = "QRCodeLink"
+
+# ✅ Use_log columns (RackNumber/BoxNumber/BoxUID removed)
+USE_LOG_EXPECTED = [
+    "TankID",
+    "BoxLabel_group",
+    "BoxID",
+    "TubeNumber",
+    "Use",
+    "User",
+    "Time_stamp",
+    "ShippingTo",
+    "Memo",
+]
 
 HIV_CODE = {"HIV+": "HP", "HIV-": "HN"}
 DRUG_CODE = {"Cocaine": "COC", "Cannabis": "CAN", "Poly": "POL", "NON-DRUG": "NON-DRUG"}
@@ -99,6 +133,15 @@ def qr_link_for_boxuid(box_uid: str, px: int = QR_PX) -> str:
     text = urllib.parse.quote(box_uid, safe="")
     return f"https://quickchart.io/qr?text={text}&size={px}&ecLevel=Q&margin=1"
 
+def split_tube(t: str) -> Tuple[str, str]:
+    t = safe_strip(t)
+    if not t:
+        return "", ""
+    parts = t.split(" ", 1)
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1]
+
 def read_tab(tab_name: str) -> pd.DataFrame:
     svc = sheets_service()
     resp = svc.spreadsheets().values().get(
@@ -127,6 +170,10 @@ def read_tab(tab_name: str) -> pd.DataFrame:
     return pd.DataFrame(fixed, columns=header)
 
 def build_box_map() -> dict:
+    """
+    Uses BOX_TAB='boxNumber' (separate lookup sheet).
+    This is NOT LN3.
+    """
     df = read_tab(BOX_TAB)
     if df.empty:
         return {}
@@ -155,7 +202,7 @@ def get_sheet_id(service, sheet_title: str) -> int:
             return int(props.get("sheetId"))
     raise ValueError(f"Could not find sheetId for tab: {sheet_title}")
 
-# ✅ IMPORTANT: do NOT drop blanks in header (prevents column misalignment)
+# ✅ Important: do NOT drop blanks from header (prevents column misalignment)
 def get_header(service, tab: str) -> list:
     resp = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
@@ -200,30 +247,38 @@ def append_row_by_header(service, tab: str, data: dict):
     ).execute()
 
 def ensure_ln_header(service):
-    # Recommended header for multi-tank
-    recommended = ["TankID", "RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
+    recommended = [
+        "TankID",
+        "RackNumber",
+        "BoxLabel_group",  # ✅
+        "BoxUID",
+        "TubeNumber",
+        "TubeAmount",
+        "Memo",
+        "BoxID",
+        "QRCodeLink",
+    ]
     set_header_if_blank(service, LN_TAB, recommended)
 
     row1 = get_header(service, LN_TAB)
-    required = ["BoxNumber", "TubeNumber", "TubeAmount", "TankID", "BoxID"]
+    required = ["TankID", "BoxLabel_group", "BoxID", "TubeNumber", "TubeAmount"]
     missing_required = [c for c in required if c not in row1]
     if missing_required:
         st.warning(f"{LN_TAB} header missing required columns: {', '.join(missing_required)}")
 
 def ensure_use_log_header(service):
-    expected = ["TankID", "RackNumber", "BoxNumber", "BoxUID", "BoxID", "TubeNumber", "Use", "User", "Time_stamp", "ShippingTo", "Memo"]
-    set_header_if_blank(service, USE_LOG_TAB, expected)
+    set_header_if_blank(service, USE_LOG_TAB, USE_LOG_EXPECTED)
 
     row1 = get_header(service, USE_LOG_TAB)
-    missing = [c for c in expected if c not in row1]
+    missing = [c for c in USE_LOG_EXPECTED if c not in row1]
     if missing:
         st.warning(f"{USE_LOG_TAB} header missing columns: {', '.join(missing)}")
 
 def cleanup_zero_tubeamount_rows(service, ln_all_df: pd.DataFrame) -> bool:
-    if ln_all_df is None or ln_all_df.empty or "TubeAmount" not in ln_all_df.columns:
+    if ln_all_df is None or ln_all_df.empty or AMT_COL not in ln_all_df.columns:
         return False
 
-    amounts = pd.to_numeric(ln_all_df["TubeAmount"], errors="coerce").fillna(0).astype(int)
+    amounts = pd.to_numeric(ln_all_df[AMT_COL], errors="coerce").fillna(0).astype(int)
     zero_idxs = [int(i) for i in ln_all_df.index[amounts == 0].tolist()]
     if not zero_idxs:
         return False
@@ -246,9 +301,9 @@ def cleanup_zero_tubeamount_rows(service, ln_all_df: pd.DataFrame) -> bool:
     return True
 
 def get_current_max_boxid(ln_view_df: pd.DataFrame) -> int:
-    if ln_view_df is None or ln_view_df.empty or "BoxID" not in ln_view_df.columns:
+    if ln_view_df is None or ln_view_df.empty or BOXID_COL not in ln_view_df.columns:
         return 0
-    s = pd.to_numeric(ln_view_df["BoxID"], errors="coerce").dropna()
+    s = pd.to_numeric(ln_view_df[BOXID_COL], errors="coerce").dropna()
     if s.empty:
         return 0
     return int(s.max())
@@ -258,8 +313,8 @@ def compute_next_boxuid(ln_view_df: pd.DataFrame, tank_id: str, rack: int, hp_hn
     prefix = f"{tank_id}-R{int(rack):02d}-{hp_hn}-{drug_code}-"
     max_n = 0
 
-    if ln_view_df is not None and (not ln_view_df.empty) and ("BoxUID" in ln_view_df.columns):
-        for v in ln_view_df["BoxUID"].dropna().astype(str):
+    if ln_view_df is not None and (not ln_view_df.empty) and (BOXUID_COL in ln_view_df.columns):
+        for v in ln_view_df[BOXUID_COL].dropna().astype(str):
             s = v.strip()
             if s.startswith(prefix) and re.search(r"-(\d{2})$", s):
                 try:
@@ -275,10 +330,10 @@ def compute_next_boxuid(ln_view_df: pd.DataFrame, tank_id: str, rack: int, hp_hn
 
 def update_ln_tubeamount_by_index(service, idx0: int, new_amount: int):
     header = get_header(service, LN_TAB)
-    if "TubeAmount" not in header:
-        raise ValueError(f"{LN_TAB} missing 'TubeAmount' column in header.")
+    if AMT_COL not in header:
+        raise ValueError(f"{LN_TAB} missing '{AMT_COL}' column in header.")
 
-    col_idx = header.index("TubeAmount")
+    col_idx = header.index(AMT_COL)
     a1_col = col_to_a1(col_idx)
     sheet_row = idx0 + 2  # header row +1, plus 1-indexed rows
 
@@ -306,40 +361,31 @@ def delete_ln_row_by_index(service, idx0: int):
         }]},
     ).execute()
 
-def split_tube(t: str) -> Tuple[str, str]:
-    t = safe_strip(t)
-    if not t:
-        return "", ""
-    parts = t.split(" ", 1)
-    if len(parts) == 1:
-        return parts[0], ""
-    return parts[0], parts[1]
-
 def find_ln_row_index_by_keys(
     ln_all_df: pd.DataFrame,
     tank_id: str,
-    box_number: str,
+    box_label_group: str,
     boxid: str,
     tube_number: str,
 ) -> Tuple[Optional[int], Optional[int]]:
     if ln_all_df is None or ln_all_df.empty:
         return None, None
 
-    needed = {"TankID", "BoxNumber", "BoxID", "TubeNumber", "TubeAmount"}
+    needed = {TANK_COL, BOX_COL, BOXID_COL, TUBE_COL, AMT_COL}
     if not needed.issubset(set(ln_all_df.columns)):
         return None, None
 
     df = ln_all_df.copy()
-    df["TankID"] = df["TankID"].astype(str).map(lambda x: safe_strip(x).upper())
-    df["BoxNumber"] = df["BoxNumber"].astype(str).map(safe_strip)
-    df["BoxID"] = df["BoxID"].astype(str).map(safe_strip)
-    df["TubeNumber"] = df["TubeNumber"].astype(str).map(safe_strip)
+    df[TANK_COL] = df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
+    df[BOX_COL] = df[BOX_COL].astype(str).map(safe_strip)
+    df[BOXID_COL] = df[BOXID_COL].astype(str).map(safe_strip)
+    df[TUBE_COL] = df[TUBE_COL].astype(str).map(safe_strip)
 
     mask = (
-        (df["TankID"] == safe_strip(tank_id).upper()) &
-        (df["BoxNumber"] == safe_strip(box_number)) &
-        (df["BoxID"] == safe_strip(boxid)) &
-        (df["TubeNumber"] == safe_strip(tube_number))
+        (df[TANK_COL] == safe_strip(tank_id).upper()) &
+        (df[BOX_COL] == safe_strip(box_label_group)) &
+        (df[BOXID_COL] == safe_strip(boxid)) &
+        (df[TUBE_COL] == safe_strip(tube_number))
     )
 
     hits = df[mask]
@@ -347,7 +393,7 @@ def find_ln_row_index_by_keys(
         return None, None
 
     idx0 = int(hits.index[0])
-    cur_amount = to_int_amount(hits.iloc[0].get("TubeAmount", 0), default=0)
+    cur_amount = to_int_amount(hits.iloc[0].get(AMT_COL, 0), default=0)
     return idx0, cur_amount
 
 def build_use_log_row_from_ln_row(
@@ -363,13 +409,12 @@ def build_use_log_row_from_ln_row(
     date_str = now.strftime("%m/%d/%Y")
     ts = f"{time_str} {date_str}"
 
+    # ✅ Use_log no longer stores RackNumber/BoxUID
     return {
         "TankID": safe_strip(tank_id).upper(),
-        "RackNumber": safe_strip(row.get("RackNumber", "")),
-        "BoxNumber": safe_strip(row.get("BoxNumber", "")),
-        "BoxUID": safe_strip(row.get("BoxUID", "")),
-        "BoxID": safe_strip(row.get("BoxID", "")),
-        "TubeNumber": safe_strip(row.get("TubeNumber", "")),
+        "BoxLabel_group": safe_strip(row.get(BOX_COL, "")),
+        "BoxID": safe_strip(row.get(BOXID_COL, "")),
+        "TubeNumber": safe_strip(row.get(TUBE_COL, "")),
         "Use": int(use_amt),
         "User": safe_strip(user_initials).upper(),
         "Time_stamp": ts,
@@ -379,7 +424,7 @@ def build_use_log_row_from_ln_row(
 
 def build_final_report_row_from_ui(
     tank_id: str,
-    box_number: str,
+    box_label_group: str,
     boxid: str,
     prefix: str,
     suffix: str,
@@ -391,7 +436,7 @@ def build_final_report_row_from_ui(
 ) -> dict:
     return {
         "TankID": safe_strip(tank_id).upper(),
-        "BoxLabel_group": safe_strip(box_number),
+        "BoxLabel_group": safe_strip(box_label_group),
         "BoxID": safe_strip(boxid),
         "Prefix": safe_strip(prefix).upper(),
         "Tube suffix": safe_strip(suffix),
@@ -491,11 +536,11 @@ try:
 except Exception as e:
     st.warning(f"Auto-clean failed: {e}")
 
-# Filter view for sidebar-selected tank (for inventory view + add record)
+# Filter view for sidebar-selected tank (inventory view + add record)
 ln_view_df = ln_all_df.copy()
-if ln_view_df is not None and (not ln_view_df.empty) and ("TankID" in ln_view_df.columns):
-    ln_view_df["TankID"] = ln_view_df["TankID"].astype(str).map(lambda x: safe_strip(x).upper())
-    ln_view_df = ln_view_df[ln_view_df["TankID"] == safe_strip(selected_tank).upper()].copy()
+if ln_view_df is not None and (not ln_view_df.empty) and (TANK_COL in ln_view_df.columns):
+    ln_view_df[TANK_COL] = ln_view_df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
+    ln_view_df = ln_view_df[ln_view_df[TANK_COL] == safe_strip(selected_tank).upper()].copy()
 
 # ---------- Add New LN Record ----------
 st.subheader("➕ Add LN Record")
@@ -515,7 +560,8 @@ with st.form("ln_add", clear_on_submit=True):
         st.error(f"Unknown Drug Group: {drug_group}. Please update DRUG_CODE.")
         st.stop()
 
-    box_number = f"{hp_hn}-{drug_code}"
+    # this is the LN3 grouping label (HP-COC, etc.)
+    box_label_group = f"{hp_hn}-{drug_code}"
 
     # ----- BoxID (NOT editable) -----
     current_max_boxid = get_current_max_boxid(ln_view_df)
@@ -572,15 +618,15 @@ with st.form("ln_add", clear_on_submit=True):
             qr_link = qr_link_for_boxuid(box_uid)
 
             data = {
-                "TankID": safe_strip(selected_tank).upper(),
-                "RackNumber": int(rack),
-                "BoxNumber": box_number,
-                "BoxUID": box_uid,
-                "TubeNumber": tube_number,
-                "TubeAmount": int(tube_amount),
-                "Memo": memo,
-                "BoxID": boxid_input,
-                "QRCodeLink": qr_link,
+                TANK_COL: safe_strip(selected_tank).upper(),
+                RACK_COL: int(rack),
+                BOX_COL: box_label_group,  # ✅ BoxLabel_group
+                BOXUID_COL: box_uid,
+                TUBE_COL: tube_number,
+                AMT_COL: int(tube_amount),
+                MEMO_COL: memo,
+                BOXID_COL: boxid_input,
+                QR_COL: qr_link,
             }
             append_row_by_header(service, LN_TAB, data)
             st.success(f"Saved ✅ {box_uid}")
@@ -603,9 +649,9 @@ with st.form("ln_add", clear_on_submit=True):
 
             ln_all_df = read_tab(LN_TAB)
             ln_view_df = ln_all_df.copy()
-            if "TankID" in ln_view_df.columns:
-                ln_view_df["TankID"] = ln_view_df["TankID"].astype(str).map(lambda x: safe_strip(x).upper())
-                ln_view_df = ln_view_df[ln_view_df["TankID"] == safe_strip(selected_tank).upper()].copy()
+            if TANK_COL in ln_view_df.columns:
+                ln_view_df[TANK_COL] = ln_view_df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
+                ln_view_df = ln_view_df[ln_view_df[TANK_COL] == safe_strip(selected_tank).upper()].copy()
 
         except HttpError as e:
             st.error("Google Sheets API error while writing to LN.")
@@ -657,45 +703,43 @@ st.subheader("📉 Log Usage (LN) — subtract from TubeAmount + append Final Re
 
 if ln_all_df is None or ln_all_df.empty:
     st.info("LN3 is empty — nothing to log.")
-elif not {"TankID", "BoxNumber", "BoxID", "TubeNumber", "TubeAmount"}.issubset(set(ln_all_df.columns)):
-    st.error("LN3 must include columns: TankID, BoxNumber, BoxID, TubeNumber, TubeAmount.")
+elif not {TANK_COL, BOX_COL, BOXID_COL, TUBE_COL, AMT_COL}.issubset(set(ln_all_df.columns)):
+    st.error(f"LN3 must include columns: {TANK_COL}, {BOX_COL}, {BOXID_COL}, {TUBE_COL}, {AMT_COL}.")
 else:
     dfv = ln_all_df.copy()
-    dfv["TankID"] = dfv["TankID"].astype(str).map(lambda x: safe_strip(x).upper())
-    dfv["BoxNumber"] = dfv["BoxNumber"].astype(str).map(safe_strip)
-    dfv["BoxID"] = dfv["BoxID"].astype(str).map(safe_strip)
-    dfv["TubeNumber"] = dfv["TubeNumber"].astype(str).map(safe_strip)
-    dfv["TubeAmount"] = pd.to_numeric(dfv["TubeAmount"], errors="coerce").fillna(0).astype(int)
+    dfv[TANK_COL] = dfv[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
+    dfv[BOX_COL] = dfv[BOX_COL].astype(str).map(safe_strip)
+    dfv[BOXID_COL] = dfv[BOXID_COL].astype(str).map(safe_strip)
+    dfv[TUBE_COL] = dfv[TUBE_COL].astype(str).map(safe_strip)
+    dfv[AMT_COL] = pd.to_numeric(dfv[AMT_COL], errors="coerce").fillna(0).astype(int)
 
-    # derived prefix/suffix
-    dfv["_prefix"] = dfv["TubeNumber"].map(lambda x: split_tube(x)[0].upper())
-    dfv["_suffix"] = dfv["TubeNumber"].map(lambda x: split_tube(x)[1])
+    dfv["_prefix"] = dfv[TUBE_COL].map(lambda x: split_tube(x)[0].upper())
+    dfv["_suffix"] = dfv[TUBE_COL].map(lambda x: split_tube(x)[1])
 
-    # ---- dropdown chain ----
-    tank_opts = sorted([t for t in dfv["TankID"].dropna().unique().tolist() if safe_strip(t)])
+    tank_opts = sorted([t for t in dfv[TANK_COL].dropna().unique().tolist() if safe_strip(t)])
     chosen_tank = st.selectbox("TankID (pulldown)", ["(select)"] + tank_opts, key="use_ln_tank")
 
     scoped = dfv.copy()
     if chosen_tank != "(select)":
-        scoped = scoped[scoped["TankID"] == safe_strip(chosen_tank).upper()].copy()
+        scoped = scoped[scoped[TANK_COL] == safe_strip(chosen_tank).upper()].copy()
     else:
         scoped = scoped.iloc[0:0].copy()
 
-    box_opts = sorted([b for b in scoped["BoxNumber"].dropna().unique().tolist() if safe_strip(b)])
-    chosen_box = st.selectbox("BoxLabel_group (BoxNumber) (pulldown)", ["(select)"] + box_opts, key="use_ln_box")
+    box_opts = sorted([b for b in scoped[BOX_COL].dropna().unique().tolist() if safe_strip(b)])
+    chosen_box = st.selectbox("BoxLabel_group (pulldown)", ["(select)"] + box_opts, key="use_ln_box")
 
     scoped2 = scoped.copy()
     if chosen_box != "(select)":
-        scoped2 = scoped2[scoped2["BoxNumber"] == safe_strip(chosen_box)].copy()
+        scoped2 = scoped2[scoped2[BOX_COL] == safe_strip(chosen_box)].copy()
     else:
         scoped2 = scoped2.iloc[0:0].copy()
 
-    boxid_opts = sorted([x for x in scoped2["BoxID"].dropna().unique().tolist() if safe_strip(x)])
+    boxid_opts = sorted([x for x in scoped2[BOXID_COL].dropna().unique().tolist() if safe_strip(x)])
     chosen_boxid = st.selectbox("BoxID (pulldown)", ["(select)"] + boxid_opts, key="use_ln_boxid")
 
     scoped3 = scoped2.copy()
     if chosen_boxid != "(select)":
-        scoped3 = scoped3[scoped3["BoxID"] == safe_strip(chosen_boxid)].copy()
+        scoped3 = scoped3[scoped3[BOXID_COL] == safe_strip(chosen_boxid)].copy()
     else:
         scoped3 = scoped3.iloc[0:0].copy()
 
@@ -711,7 +755,7 @@ else:
     suffix_opts = sorted([s for s in scoped4["_suffix"].dropna().unique().tolist() if safe_strip(s)])
     chosen_suffix = st.selectbox("Tube suffix (pulldown)", ["(select)"] + suffix_opts, key="use_ln_suffix")
 
-    # current matching record(s) — SHOW TubeAmount
+    # Current matching record(s): SHOW TubeAmount
     match_df = scoped4.copy()
     if chosen_suffix != "(select)":
         match_df = match_df[match_df["_suffix"] == safe_strip(chosen_suffix)].copy()
@@ -722,10 +766,10 @@ else:
     if match_df.empty:
         st.info("No matching record yet. Select TankID → BoxLabel_group → BoxID → Prefix → Tube suffix.")
     else:
-        show_cols = [c for c in ["TankID", "RackNumber", "BoxNumber", "BoxID", "BoxUID", "TubeNumber", "TubeAmount", "Memo"] if c in match_df.columns]
+        show_cols = [c for c in [TANK_COL, RACK_COL, BOX_COL, BOXID_COL, BOXUID_COL, TUBE_COL, AMT_COL, MEMO_COL] if c in match_df.columns]
         st.dataframe(match_df[show_cols], use_container_width=True, hide_index=True)
 
-    # submit usage
+    # Submit usage
     with st.form("submit_ln_usage"):
         st.markdown("**User inputs (LN): Use, User, ShippingTo, Memo**")
         use_amt = st.number_input("Use", min_value=1, step=1, value=1)
@@ -752,7 +796,7 @@ else:
                 idx0, cur_amount = find_ln_row_index_by_keys(
                     ln_all_df=ln_all_df,
                     tank_id=chosen_tank,
-                    box_number=chosen_box,
+                    box_label_group=chosen_box,
                     boxid=chosen_boxid,
                     tube_number=tube_number,
                 )
@@ -767,14 +811,14 @@ else:
 
                 row_before = ln_all_df.iloc[idx0].copy()
 
-                # append to Use_log (persist)
+                # Append to Use_log (persist) — header has no RackNumber/BoxUID
                 append_row_by_header(
                     service,
                     USE_LOG_TAB,
                     build_use_log_row_from_ln_row(row_before, int(use_amt), user_initials, shipping_to, memo_in, chosen_tank),
                 )
 
-                # update or delete LN3 row
+                # Update or delete LN3 row
                 if new_amount == 0:
                     delete_ln_row_by_index(service, idx0)
                     st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN3 row deleted.")
@@ -782,13 +826,13 @@ else:
                     update_ln_tubeamount_by_index(service, idx0, new_amount)
                     st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
 
-                # append to session final report (HIDE TubeAmount; show Use)
+                # Append to session final report (HIDE TubeAmount; show Use)
                 now = datetime.now(NY_TZ)
                 ts = f"{(now.strftime('%I:%M:%S').lstrip('0') or now.strftime('%I:%M:%S'))} {now.strftime('%m/%d/%Y')}"
                 st.session_state.usage_final_rows.append(
                     build_final_report_row_from_ui(
                         tank_id=chosen_tank,
-                        box_number=chosen_box,
+                        box_label_group=chosen_box,
                         boxid=chosen_boxid,
                         prefix=chosen_prefix,
                         suffix=chosen_suffix,
@@ -800,9 +844,8 @@ else:
                     )
                 )
 
-                # refresh data
+                # Refresh
                 ln_all_df = read_tab(LN_TAB)
-
                 if new_amount == 0:
                     st.rerun()
 
@@ -815,7 +858,18 @@ else:
 
     # Final report (session view; hide TubeAmount, show Use)
     st.markdown("### ✅ Final Report (session view; HIDE TubeAmount, show Use)")
-    final_cols = ["TankID", "BoxLabel_group", "BoxID", "Prefix", "Tube suffix", "Use", "User", "Time_stamp", "ShippingTo", "Memo"]
+    final_cols = [
+        "TankID",
+        "BoxLabel_group",
+        "BoxID",
+        "Prefix",
+        "Tube suffix",
+        "Use",
+        "User",
+        "Time_stamp",
+        "ShippingTo",
+        "Memo",
+    ]
 
     if st.session_state.usage_final_rows:
         final_df = pd.DataFrame(st.session_state.usage_final_rows).reindex(columns=final_cols, fill_value="")
