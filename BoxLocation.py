@@ -2,38 +2,14 @@
 # ============================================================
 # Box Location + LN Inventory (LN3 multi-tank) + Freezer Inventory + Use_log + Final Report
 #
-# ✅ LN3:
-#   - Uses BoxLabel_group (NOT BoxNumber)
-#   - Required columns: TankID, RackNumber, BoxLabel_group, BoxID, TubeNumber, TubeAmount
-#   - Add LN record: auto BoxUID + QR + BoxID option
-#   - Log Usage (LN): subtract TubeAmount; if 0 delete row; append to Use_log; append to session Final Report
-#   - Log Usage (LN) viewer: SHOW RackNumber BETWEEN TankID AND BoxLabel_group
-#
-# ✅ Freezer_Inventory (your schema):
-#   Columns:
-#   FreezerID, BoxID, Prefix, Tube suffix, TubeAmount, Date Collected, BoxLabel_group,
-#   Samples Received, Missing, Urine Results, Collected By, Memo
-#   - AddFreezer Inventory Record:
-#       BoxID option:
-#         1) Use the previous box = current_max_boxnumber
-#         2) Open a new box = current_max_boxnumber + 1
-#       where current_max_boxnumber = max( boxNumber[BoxNumber], Freezer_Inventory[BoxID] )
-#   - Duplicate check (same FreezerID/BoxLabel_group/BoxID/Prefix/Tube suffix)
-#   - Log Usage (Freezer): subtract TubeAmount; if 0 delete row; append to Use_log; append to session Final Report
-#
-# ✅ Use_log:
-#   - App does NOT overwrite existing non-blank header
-#   - Recommended header (if blank):
-#     StorageType, TankID, RackNumber, FreezerID, BoxLabel_group, BoxID,
-#     TubeNumber, Prefix, Tube suffix, Use, User, Time_stamp, ShippingTo, Memo
-#
-# ✅ Auto-clean on load:
-#   - After loading LN3 / Freezer_Inventory, delete rows where TubeAmount == 0
-#
 # ✅ Final report download:
 #   - Button label stays: "⬇️ Download the session final report CSV"
 #   - Download file is Excel: shippingList + ShippingTo + TodayDate(YYYYMMDD).xlsx
-#     (If multiple ShippingTo values exist: uses MULTI)
+#   - IMPORTANT: Streamlit Cloud may NOT have openpyxl installed.
+#     This code auto-chooses:
+#       1) xlsxwriter (preferred if installed)
+#       2) openpyxl (fallback)
+#     If neither exists, it falls back to CSV with the same naming pattern ('.csv').
 # ============================================================
 
 import re
@@ -177,6 +153,32 @@ def safe_filename_component(s: str, default: str = "Unknown") -> str:
     s = re.sub(r'[\\/:*?"<>|]+', "_", s)
     s = re.sub(r"\s+", "_", s).strip("_")
     return s or default
+
+def pick_excel_engine() -> str | None:
+    """
+    Streamlit Cloud often lacks openpyxl.
+    Prefer xlsxwriter if available; otherwise openpyxl.
+    """
+    try:
+        import xlsxwriter  # noqa: F401
+        return "xlsxwriter"
+    except Exception:
+        pass
+    try:
+        import openpyxl  # noqa: F401
+        return "openpyxl"
+    except Exception:
+        return None
+
+def export_df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "FinalReport") -> bytes | None:
+    engine = pick_excel_engine()
+    if engine is None:
+        return None
+    output = BytesIO()
+    # NOTE: this will work with xlsxwriter even if openpyxl is missing
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
 
 def read_tab(tab_name: str) -> pd.DataFrame:
     svc = sheets_service()
@@ -668,7 +670,6 @@ else:
     except Exception:
         ln_all_df = pd.DataFrame()
 
-    # ✅ Auto-clean on load (LN3)
     try:
         if cleanup_zero_amount_rows(service, LN_TAB, ln_all_df, AMT_COL):
             st.info("🧹 Auto-clean: removed LN3 row(s) where TubeAmount was 0.")
@@ -681,7 +682,6 @@ else:
         ln_view_df[TANK_COL] = ln_view_df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
         ln_view_df = ln_view_df[ln_view_df[TANK_COL] == safe_strip(selected_tank).upper()].copy()
 
-    # ---------- Add LN Record ----------
     st.subheader("➕ Add LN Record")
     with st.form("ln_add", clear_on_submit=True):
         rack = st.selectbox("RackNumber", [1, 2, 3, 4, 5, 6], index=0)
@@ -784,7 +784,6 @@ else:
                 st.error("Failed to save LN record")
                 st.code(str(e), language="text")
 
-    # Download last QR
     if st.session_state.last_qr_link:
         try:
             png_bytes = fetch_bytes(st.session_state.last_qr_link)
@@ -798,7 +797,6 @@ else:
         except Exception as e:
             st.warning(f"Saved, but QR download failed: {e}")
 
-    # Refresh view after rerun
     try:
         ln_all_df = read_tab(LN_TAB)
     except Exception:
@@ -815,7 +813,6 @@ else:
     else:
         st.dataframe(ln_view_df, use_container_width=True, hide_index=True)
 
-    # ---------- Log Usage (LN) ----------
     st.subheader("📉 Log Usage (LN) — subtract TubeAmount + append Final Report")
     if ln_all_df is None or ln_all_df.empty:
         st.info("LN3 is empty — nothing to log.")
@@ -1255,27 +1252,34 @@ if st.session_state.usage_final_rows:
     final_df = pd.DataFrame(st.session_state.usage_final_rows).reindex(columns=final_cols, fill_value="")
     st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-    # ✅ Determine ShippingTo for filename
     ship_vals = [safe_strip(x) for x in final_df.get("ShippingTo", pd.Series([], dtype=str)).tolist() if safe_strip(x)]
     unique_ship = sorted(set(ship_vals))
     shipping_to_for_file = unique_ship[0] if len(unique_ship) == 1 else "MULTI"
     shipping_to_for_file = safe_filename_component(shipping_to_for_file, default="MULTI")
     today_for_file = datetime.now(NY_TZ).strftime("%Y%m%d")
 
-    # ✅ Export to Excel bytes
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        final_df.to_excel(writer, index=False, sheet_name="FinalReport")
-    xlsx_bytes = output.getvalue()
+    # ✅ Excel bytes (xlsxwriter -> openpyxl -> fallback to CSV)
+    xlsx_bytes = export_df_to_excel_bytes(final_df, sheet_name="FinalReport")
 
-    # ✅ Button label unchanged, file is .xlsx
-    st.download_button(
-        "⬇️ Download the session final report CSV",
-        data=xlsx_bytes,
-        file_name=f"shippingList{shipping_to_for_file}{today_for_file}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="download_final_report_xlsx",
-    )
+    if xlsx_bytes is not None:
+        st.download_button(
+            "⬇️ Download the session final report CSV",
+            data=xlsx_bytes,
+            file_name=f"shippingList{shipping_to_for_file}{today_for_file}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_final_report_xlsx",
+        )
+    else:
+        # Fallback: CSV if neither xlsxwriter nor openpyxl is installed
+        csv_bytes = final_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download the session final report CSV",
+            data=csv_bytes,
+            file_name=f"shippingList{shipping_to_for_file}{today_for_file}.csv",
+            mime="text/csv",
+            key="download_final_report_csv_fallback",
+        )
+        st.warning("Excel engine not installed (xlsxwriter/openpyxl). Downloaded as CSV instead.")
 
     if st.button("🧹 Clear session final report", key="clear_final_report"):
         st.session_state.usage_final_rows = []
