@@ -1,28 +1,17 @@
 # BoxLocation.py — Complete Streamlit App
 # 📦 Box Location (study tabs) + 🧊 LN Tank (LN1/LN2/LN3) + 🧊 Freezer Inventory + 🧾 Use_log
 #
-# ✅ BoxID behavior (LOCKED):
-#   - Use previous box  → BoxID = current global max (locked)
-#   - Open a new box    → BoxID = max + 1 (locked) + show green reminder (after save)
+# ✅ BoxID behavior (LOCKED) — source of truth:
+#   current max BoxID = MAX(BoxID) from:
+#     - tab 'boxNumber'
+#     - tab 'Freezer_Inventory'
 #
-# ✅ Global max BoxID = max(BoxID) from:
-#   - tab 'boxNumber' (explicit column 'BoxID')
-#   - tab 'Freezer_Inventory' (explicit column 'BoxID')
+#   Use previous box → BoxID = current max (locked)
+#   Open a new box   → BoxID = max + 1 (locked) + show green reminder (after save)
 #
-# ✅ Use_log:
-#   - tab "Use_log" columns:
-#     StorageType, StorageID, TankID, RackNumber, BoxNumber, BoxUID, BoxID,
-#     TubeNumber, TubePrefix, Use, User, Time_stamp, ShippingTo, Memo
-#
-# ✅ LN tab:
-#   - default tab name "LN3" (contains all tanks; must include TankID column for filtering)
-#   - removes rows where TubeAmount==0 on load
-#   - usage subtracts TubeAmount; deletes row if it hits 0; appends Use_log; adds to session Final Usage Report
-#
-# ✅ Freezer_Inventory tab:
-#   - columns include TubePrefix, TubeAmount, BoxID
-#   - removes rows where TubeAmount==0 on load
-#   - usage subtracts TubeAmount; deletes row if it hits 0; appends Use_log; adds to session Final Usage Report
+# ✅ Date Collected defaults to today()
+# ✅ Use_log permanently stores final usage report
+# ✅ Session Final Usage Report view (TubeAmount hidden)
 
 import re
 import urllib.parse
@@ -46,7 +35,7 @@ if "last_qr_link" not in st.session_state:
 if "last_qr_uid" not in st.session_state:
     st.session_state.last_qr_uid = ""
 if "usage_final_rows" not in st.session_state:
-    st.session_state.usage_final_rows = []  # session report rows (TubeAmount hidden)
+    st.session_state.usage_final_rows = []
 
 # -------------------- Constants --------------------
 DISPLAY_TABS = ["Cocaine", "Cannabis", "HIV-neg-nondrug", "HIV+nondrug"]
@@ -58,7 +47,7 @@ TAB_MAP = {
 }
 
 BOX_TAB = "boxNumber"
-LN_TAB = "LN3"  # single sheet that stores LN1/LN2/LN3 rows (must include TankID)
+LN_TAB = "LN3"  # one sheet that stores LN1/LN2/LN3 (requires TankID column to filter)
 FREEZER_TAB = "Freezer_Inventory"
 USE_LOG_TAB = "Use_log"
 
@@ -138,10 +127,9 @@ def set_header_if_blank(service, tab: str, header: list):
         ).execute()
 
 def append_row_by_header(service, tab: str, data: dict):
-    header = get_header(service, tab)
-    if not header or all(safe_strip(x) == "" for x in header):
+    header = [safe_strip(x) for x in get_header(service, tab)]
+    if not header or all(h == "" for h in header):
         raise ValueError(f"{tab} header row is empty.")
-    header = [safe_strip(h) for h in header]
     aligned = [data.get(col, "") for col in header]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
@@ -168,7 +156,7 @@ def to_int_amount(x, default=0) -> int:
     except Exception:
         return default
 
-# -------------------- Global max BoxID (explicit BoxID columns only) --------------------
+# -------------------- BoxID logic (SOURCE OF TRUTH) --------------------
 def max_boxid_from_boxid_col(df: pd.DataFrame, col: str = "BoxID") -> int:
     if df is None or df.empty or col not in df.columns:
         return 0
@@ -177,7 +165,12 @@ def max_boxid_from_boxid_col(df: pd.DataFrame, col: str = "BoxID") -> int:
         return 0
     return int(s.max())
 
-def compute_global_max_boxid() -> int:
+def compute_current_max_boxid() -> int:
+    """
+    ✅ current max BoxID = MAX(BoxID) from:
+      - boxNumber
+      - Freezer_Inventory
+    """
     mx = 0
     try:
         d = read_tab(BOX_TAB)
@@ -189,20 +182,23 @@ def compute_global_max_boxid() -> int:
         mx = max(mx, max_boxid_from_boxid_col(fz, "BoxID"))
     except Exception:
         pass
-    return mx
+    return int(mx)
 
-def pick_boxid_locked(global_max_boxid: int, choice: str) -> tuple[int, bool]:
+def locked_boxid_from_choice(choice: str) -> tuple[int, bool, int]:
     """
-    Returns (boxid_val, opened_new_box)
+    Returns (boxid_val, opened_new_box, current_max)
       - Use previous box → BoxID = current max (locked)
       - Open a new box   → BoxID = max + 1 (locked)
     """
+    current_max = compute_current_max_boxid()
     opened_new_box = (choice == "Open a new box")
+
     if choice == "Use the previous box":
-        boxid_val = int(global_max_boxid) if int(global_max_boxid) > 0 else 1
+        boxid_val = current_max if current_max > 0 else 1
     else:
-        boxid_val = (int(global_max_boxid) if int(global_max_boxid) > 0 else 0) + 1
-    return int(boxid_val), opened_new_box
+        boxid_val = (current_max if current_max > 0 else 0) + 1
+
+    return int(boxid_val), opened_new_box, int(current_max)
 
 def green_boxid_reminder(boxid: int):
     st.markdown(
@@ -238,22 +234,22 @@ def build_box_map() -> dict:
 
 # -------------------- Ensure headers --------------------
 def ensure_ln_header(service):
-    recommended = ["TankID", "RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
-    set_header_if_blank(service, LN_TAB, recommended)
+    header = ["TankID", "RackNumber", "BoxNumber", "BoxUID", "TubeNumber", "TubeAmount", "Memo", "BoxID", "QRCodeLink"]
+    set_header_if_blank(service, LN_TAB, header)
 
 def ensure_freezer_header(service):
-    expected = [
+    header = [
         "FreezerID", "Date Collected", "Box Number", "StudyCode", "Samples Received", "Missing Samples",
         "Group", "Urine Results", "All Collected By", "TubePrefix", "TubeAmount", "BoxID", "Memo"
     ]
-    set_header_if_blank(service, FREEZER_TAB, expected)
+    set_header_if_blank(service, FREEZER_TAB, header)
 
 def ensure_use_log_header(service):
-    expected = [
+    header = [
         "StorageType", "StorageID", "TankID", "RackNumber", "BoxNumber", "BoxUID", "BoxID",
         "TubeNumber", "TubePrefix", "Use", "User", "Time_stamp", "ShippingTo", "Memo"
     ]
-    set_header_if_blank(service, USE_LOG_TAB, expected)
+    set_header_if_blank(service, USE_LOG_TAB, header)
 
 # -------------------- LN helpers --------------------
 def compute_next_boxuid(ln_view_df: pd.DataFrame, tank_id: str, rack: int, hp_hn: str, drug_code: str) -> str:
@@ -289,7 +285,6 @@ def cleanup_zero_rows(service, tab: str, df: pd.DataFrame, amount_col: str) -> b
     zero_idxs = [int(i) for i in df.index[amounts == 0].tolist()]
     if not zero_idxs:
         return False
-
     sheet_id = get_sheet_id(service, tab)
     zero_idxs.sort(reverse=True)
     requests = [{
@@ -306,7 +301,7 @@ def update_cell_by_index(service, tab: str, idx0: int, col_name: str, new_value)
         raise ValueError(f"{tab} missing '{col_name}' in header.")
     col_idx = header.index(col_name)
     a1_col = col_to_a1(col_idx)
-    sheet_row = idx0 + 2  # header is row 1
+    sheet_row = idx0 + 2
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{tab}'!{a1_col}{sheet_row}",
@@ -316,7 +311,7 @@ def update_cell_by_index(service, tab: str, idx0: int, col_name: str, new_value)
 
 def delete_row_by_index(service, tab: str, idx0: int):
     sheet_id = get_sheet_id(service, tab)
-    start = idx0 + 1  # header offset
+    start = idx0 + 1
     service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{
@@ -334,7 +329,6 @@ def now_timestamp_str() -> str:
     return f"{time_str} {date_str}"
 
 def build_use_log_row(**kwargs) -> dict:
-    # Must match Use_log header names (extra keys ignored by append_row_by_header)
     return {
         "StorageType": kwargs.get("StorageType", ""),
         "StorageID": kwargs.get("StorageID", ""),
@@ -353,7 +347,6 @@ def build_use_log_row(**kwargs) -> dict:
     }
 
 def add_to_session_final_report(row: dict):
-    # Keep TubeAmount hidden: do not store it.
     st.session_state.usage_final_rows.append(row)
 
 # ============================================================
@@ -366,7 +359,7 @@ with st.sidebar:
     storage_type = st.radio("Storage Type", ["LN Tank", "Freezer"], horizontal=True)
 
     if storage_type == "LN Tank":
-        selected_tank = st.selectbox("Select LN Tank", TANK_OPTIONS, index=2)  # default LN3
+        selected_tank = st.selectbox("Select LN Tank", TANK_OPTIONS, index=2)
         selected_freezer = None
     else:
         selected_freezer = st.selectbox("Select Freezer", FREEZER_OPTIONS, index=0)
@@ -490,11 +483,10 @@ if storage_type == "LN Tank":
         drug_code = DRUG_CODE[drug_group]
         box_number = f"{hp_hn}-{drug_code}"
 
-        global_max = compute_global_max_boxid()
-        st.caption(f"Global max BoxID (boxNumber.BoxID + Freezer_Inventory.BoxID): {global_max if global_max else '(none)'}")
-
+        # ✅ BoxID locked logic (source of truth: boxNumber + Freezer_Inventory)
         box_choice = st.radio("BoxID option", ["Use the previous box", "Open a new box"], horizontal=True)
-        boxid_val, opened_new_box = pick_boxid_locked(global_max, box_choice)
+        boxid_val, opened_new_box, current_max = locked_boxid_from_choice(box_choice)
+        st.caption(f"Current max BoxID (boxNumber + Freezer_Inventory): {current_max if current_max else '(none)'}")
         st.text_input("BoxID (locked)", value=str(boxid_val), disabled=True)
 
         c3, c4 = st.columns(2)
@@ -553,7 +545,7 @@ if storage_type == "LN Tank":
                 st.session_state.last_qr_link = qr_link
                 st.session_state.last_qr_uid = box_uid
 
-                # ✅ green reminder only when opening a new box
+                # ✅ Green reminder (only when open new box)
                 if opened_new_box:
                     green_boxid_reminder(boxid_val)
 
@@ -564,7 +556,7 @@ if storage_type == "LN Tank":
                 st.error("Failed to save LN record")
                 st.code(str(e), language="text")
 
-    # Download QR (outside the form) — avoids Streamlit form restriction
+    # Download QR outside form
     if st.session_state.last_qr_link:
         try:
             png_bytes = fetch_bytes(st.session_state.last_qr_link)
@@ -578,7 +570,7 @@ if storage_type == "LN Tank":
         except Exception as e:
             st.warning(f"Saved, but QR download failed: {e}")
 
-    # Reload LN view + display table
+    # Reload view + table
     try:
         ln_all_df = read_tab(LN_TAB)
         ln_view_df = ln_all_df.copy()
@@ -593,142 +585,6 @@ if storage_type == "LN Tank":
         st.info("No records for this tank yet.")
     else:
         st.dataframe(ln_view_df, use_container_width=True, hide_index=True)
-
-    # Search LN by BoxNumber
-    st.markdown("### 🔎 Search LN by BoxNumber")
-    if not ln_view_df.empty and "BoxNumber" in ln_view_df.columns:
-        opts = sorted([safe_strip(x) for x in ln_view_df["BoxNumber"].dropna().unique().tolist() if safe_strip(x)])
-        chosen = st.selectbox("BoxNumber", ["(select)"] + opts, key="ln_search_box")
-        if chosen != "(select)":
-            res = ln_view_df[ln_view_df["BoxNumber"].astype(str).map(safe_strip) == safe_strip(chosen)].copy()
-            st.dataframe(res, use_container_width=True, hide_index=True)
-
-    # Log LN Usage (subtract TubeAmount, delete if 0, save to Use_log)
-    st.markdown("### 📉 Log LN Usage (subtract TubeAmount, delete if 0, save to Use_log)")
-    if ln_view_df.empty or "BoxNumber" not in ln_view_df.columns:
-        st.info("No LN records to use.")
-    else:
-        # BoxNumber selection
-        box_opts = sorted([safe_strip(x) for x in ln_view_df["BoxNumber"].dropna().astype(str).tolist() if safe_strip(x)])
-        chosen_box = st.selectbox("Select BoxNumber", ["(select)"] + sorted(set(box_opts)), key="ln_use_box")
-
-        # TubeNumber selection scoped to BoxNumber
-        chosen_tube = "(select)"
-        chosen_uid = ""
-
-        if chosen_box != "(select)":
-            sub = ln_view_df.copy()
-            sub["BoxNumber"] = sub["BoxNumber"].astype(str).map(safe_strip)
-            sub = sub[sub["BoxNumber"] == safe_strip(chosen_box)].copy()
-
-            if "TubeNumber" in sub.columns:
-                sub["TubeNumber"] = sub["TubeNumber"].astype(str).map(safe_strip)
-                tube_opts = sorted([safe_strip(x) for x in sub["TubeNumber"].dropna().tolist() if safe_strip(x)])
-                chosen_tube = st.selectbox("Select TubeNumber", ["(select)"] + sorted(set(tube_opts)), key="ln_use_tube")
-
-                # show current matching record(s)
-                if chosen_tube != "(select)":
-                    show = sub[sub["TubeNumber"] == safe_strip(chosen_tube)].copy()
-                    st.markdown("**Current matching record(s):**")
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-
-                    # if multiple matches, allow BoxUID pick
-                    if "BoxUID" in show.columns and len(show) > 1:
-                        show["BoxUID"] = show["BoxUID"].astype(str).map(safe_strip)
-                        uid_opts = sorted([x for x in show["BoxUID"].dropna().tolist() if safe_strip(x)])
-                        chosen_uid = st.selectbox("Multiple matches found. Select BoxUID", ["(select)"] + uid_opts, key="ln_use_uid")
-                        if chosen_uid == "(select)":
-                            chosen_uid = ""
-
-        with st.form("ln_use_form"):
-            user_initials = st.text_input("Your initials (User)", placeholder="e.g., JW").strip()
-            shipping_to = st.text_input("ShippingTo", placeholder="e.g., Dr. Smith / UCSF").strip()
-            use_amt = st.number_input("Use", min_value=0, step=1, value=1)
-            submitted_use = st.form_submit_button("Submit Usage", type="primary")
-
-            if submitted_use:
-                if chosen_box == "(select)" or chosen_tube == "(select)":
-                    st.error("Please select BoxNumber and TubeNumber.")
-                    st.stop()
-                if use_amt <= 0:
-                    st.error("Use must be > 0.")
-                    st.stop()
-                if not user_initials:
-                    st.error("Please enter your initials (User).")
-                    st.stop()
-                if not shipping_to:
-                    st.error("Please enter ShippingTo.")
-                    st.stop()
-
-                # Reload full LN to update exact row index
-                ln_all_df2 = read_tab(LN_TAB)
-                if ln_all_df2.empty:
-                    st.error("LN sheet is empty.")
-                    st.stop()
-
-                df0 = ln_all_df2.copy()
-                for col in ["TankID", "BoxNumber", "TubeNumber", "TubeAmount"]:
-                    if col not in df0.columns:
-                        st.error(f"{LN_TAB} missing required column: {col}")
-                        st.stop()
-
-                df0["TankID"] = df0["TankID"].astype(str).map(lambda x: safe_strip(x).upper())
-                df0["BoxNumber"] = df0["BoxNumber"].astype(str).map(safe_strip)
-                df0["TubeNumber"] = df0["TubeNumber"].astype(str).map(safe_strip)
-
-                mask = (
-                    (df0["TankID"] == safe_strip(selected_tank).upper()) &
-                    (df0["BoxNumber"] == safe_strip(chosen_box)) &
-                    (df0["TubeNumber"] == safe_strip(chosen_tube))
-                )
-                if chosen_uid and "BoxUID" in df0.columns:
-                    df0["BoxUID"] = df0["BoxUID"].astype(str).map(safe_strip)
-                    mask = mask & (df0["BoxUID"] == safe_strip(chosen_uid))
-
-                hits = df0[mask]
-                if hits.empty:
-                    st.error("No matching LN row found.")
-                    st.stop()
-
-                idx0 = int(hits.index[0])
-                row_before = ln_all_df2.iloc[idx0].copy()
-
-                cur_amount = to_int_amount(row_before.get("TubeAmount", 0), default=0)
-                new_amount = cur_amount - int(use_amt)
-                if new_amount < 0:
-                    st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
-                    st.stop()
-
-                # append Use_log
-                log_row = build_use_log_row(
-                    StorageType="LN",
-                    StorageID=safe_strip(selected_tank).upper(),
-                    TankID=safe_strip(selected_tank).upper(),
-                    RackNumber=safe_strip(row_before.get("RackNumber", "")),
-                    BoxNumber=safe_strip(row_before.get("BoxNumber", "")),
-                    BoxUID=safe_strip(row_before.get("BoxUID", "")),
-                    BoxID=safe_strip(row_before.get("BoxID", "")),
-                    TubeNumber=safe_strip(row_before.get("TubeNumber", "")),
-                    TubePrefix="",
-                    Use=int(use_amt),
-                    User=safe_strip(user_initials).upper(),
-                    Time_stamp=now_timestamp_str(),
-                    ShippingTo=safe_strip(shipping_to),
-                    Memo=safe_strip(row_before.get("Memo", "")),
-                )
-                append_row_by_header(service, USE_LOG_TAB, log_row)
-
-                # update/delete stock
-                if new_amount == 0:
-                    delete_row_by_index(service, LN_TAB, idx0)
-                    st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — LN row deleted.")
-                else:
-                    update_cell_by_index(service, LN_TAB, idx0, "TubeAmount", int(new_amount))
-                    st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
-
-                # add to session final report (TubeAmount hidden)
-                add_to_session_final_report(log_row)
-                st.rerun()
 
 # ============================================================
 # 2B) FREEZER
@@ -749,7 +605,7 @@ else:
     except Exception as e:
         st.warning(f"Freezer zero-row cleanup failed: {e}")
 
-    # Filter by selected freezer
+    # Filter view by freezer
     fz_view_df = fz_all_df.copy()
     if not fz_view_df.empty and "FreezerID" in fz_view_df.columns:
         fz_view_df["FreezerID"] = fz_view_df["FreezerID"].astype(str).map(safe_strip)
@@ -760,7 +616,9 @@ else:
     # -------- Add Freezer Record --------
     st.markdown("### ➕ Add Freezer Record")
     with st.form("freezer_add", clear_on_submit=True):
-        date_collected = st.date_input("Date Collected")
+        # ✅ Date Collected defaults to today()
+        date_collected = st.date_input("Date Collected", value=datetime.now(NY_TZ).date())
+
         box_number_str = st.text_input("Box Number (string for search)", placeholder="e.g., AD-BOX-001").strip()
         study_code = st.text_input("StudyCode", placeholder="e.g., AD").strip()
 
@@ -778,11 +636,10 @@ else:
         tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
         memo = st.text_area("Memo (optional)")
 
-        global_max = compute_global_max_boxid()
-        st.caption(f"Global max BoxID (boxNumber.BoxID + Freezer_Inventory.BoxID): {global_max if global_max else '(none)'}")
-
+        # ✅ BoxID locked logic (source of truth: boxNumber + Freezer_Inventory)
         box_choice = st.radio("BoxID option", ["Use the previous box", "Open a new box"], horizontal=True)
-        boxid_val, opened_new_box = pick_boxid_locked(global_max, box_choice)
+        boxid_val, opened_new_box, current_max = locked_boxid_from_choice(box_choice)
+        st.caption(f"Current max BoxID (boxNumber + Freezer_Inventory): {current_max if current_max else '(none)'}")
         st.text_input("BoxID (locked)", value=str(boxid_val), disabled=True)
 
         submitted = st.form_submit_button("Save to Freezer", type="primary")
@@ -817,7 +674,7 @@ else:
                 append_row_by_header(service, FREEZER_TAB, data)
                 st.success("Saved ✅ Freezer record added.")
 
-                # ✅ green reminder only when opening a new box
+                # ✅ Green reminder (only when open new box)
                 if opened_new_box:
                     green_boxid_reminder(boxid_val)
 
@@ -827,121 +684,6 @@ else:
             except Exception as e:
                 st.error("Failed to save freezer record")
                 st.code(str(e), language="text")
-
-    # Reload + show Freezer table
-    try:
-        fz_all_df = read_tab(FREEZER_TAB)
-        fz_view_df = fz_all_df.copy()
-        if not fz_view_df.empty and "FreezerID" in fz_view_df.columns:
-            fz_view_df["FreezerID"] = fz_view_df["FreezerID"].astype(str).map(safe_strip)
-            fz_view_df = fz_view_df[fz_view_df["FreezerID"] == safe_strip(selected_freezer)].copy()
-    except Exception:
-        fz_view_df = pd.DataFrame()
-
-    st.markdown("### 📋 Freezer Inventory Table")
-    if fz_view_df.empty:
-        st.info("No records for this freezer yet.")
-    else:
-        st.dataframe(fz_view_df, use_container_width=True, hide_index=True)
-
-    # Search freezer by Box Number
-    st.markdown("### 🔎 Search Freezer by Box Number")
-    if not fz_view_df.empty and "Box Number" in fz_view_df.columns:
-        opts = sorted([safe_strip(x) for x in fz_view_df["Box Number"].dropna().unique().tolist() if safe_strip(x)])
-        chosen = st.selectbox("Box Number", ["(select)"] + opts, key="fz_search_box")
-        if chosen != "(select)":
-            res = fz_view_df[fz_view_df["Box Number"].astype(str).map(safe_strip) == safe_strip(chosen)].copy()
-            st.dataframe(res, use_container_width=True, hide_index=True)
-
-    # Log freezer usage (subtract TubeAmount, delete if 0, save to Use_log)
-    st.markdown("### 📉 Log Freezer Usage (subtract TubeAmount, delete if 0, save to Use_log)")
-    if fz_view_df.empty or "Box Number" not in fz_view_df.columns:
-        st.info("No freezer records to use.")
-    else:
-        box_opts = sorted([safe_strip(x) for x in fz_view_df["Box Number"].dropna().unique().tolist() if safe_strip(x)])
-        use_box = st.selectbox("Select Box Number", ["(select)"] + box_opts, key="fz_use_box")
-
-        if use_box != "(select)":
-            cur_rows = fz_view_df[fz_view_df["Box Number"].astype(str).map(safe_strip) == safe_strip(use_box)].copy()
-            st.markdown("**Current matching record(s):**")
-            st.dataframe(cur_rows, use_container_width=True, hide_index=True)
-
-        with st.form("fz_use_form"):
-            user_initials = st.text_input("Your initials (User)", placeholder="e.g., JW").strip()
-            shipping_to = st.text_input("ShippingTo", placeholder="e.g., Dr. Smith / UCSF").strip()
-            use_amt = st.number_input("Use", min_value=0, step=1, value=1)
-            submitted_use = st.form_submit_button("Submit Usage", type="primary")
-
-            if submitted_use:
-                if use_box == "(select)":
-                    st.error("Please select a Box Number.")
-                    st.stop()
-                if use_amt <= 0:
-                    st.error("Use must be > 0.")
-                    st.stop()
-                if not user_initials:
-                    st.error("Please enter your initials (User).")
-                    st.stop()
-                if not shipping_to:
-                    st.error("Please enter ShippingTo.")
-                    st.stop()
-
-                fz_all_df2 = read_tab(FREEZER_TAB)
-                if fz_all_df2.empty:
-                    st.error("Freezer_Inventory is empty.")
-                    st.stop()
-
-                df0 = fz_all_df2.copy()
-                for col in ["FreezerID", "Box Number", "TubeAmount"]:
-                    if col not in df0.columns:
-                        st.error(f"{FREEZER_TAB} missing required column: {col}")
-                        st.stop()
-
-                df0["FreezerID"] = df0["FreezerID"].astype(str).map(safe_strip)
-                df0["Box Number"] = df0["Box Number"].astype(str).map(safe_strip)
-
-                mask = (df0["FreezerID"] == safe_strip(selected_freezer)) & (df0["Box Number"] == safe_strip(use_box))
-                hits = df0[mask]
-                if hits.empty:
-                    st.error("No matching Freezer row found.")
-                    st.stop()
-
-                idx0 = int(hits.index[0])
-                row_before = fz_all_df2.iloc[idx0].copy()
-
-                cur_amount = to_int_amount(row_before.get("TubeAmount", 0), default=0)
-                new_amount = cur_amount - int(use_amt)
-                if new_amount < 0:
-                    st.error(f"Not enough stock. Current TubeAmount={cur_amount}, Use={int(use_amt)}")
-                    st.stop()
-
-                log_row = build_use_log_row(
-                    StorageType="Freezer",
-                    StorageID=safe_strip(selected_freezer),
-                    TankID="",
-                    RackNumber="",
-                    BoxNumber=safe_strip(row_before.get("Box Number", "")),
-                    BoxUID="",
-                    BoxID=safe_strip(row_before.get("BoxID", "")),
-                    TubeNumber="",
-                    TubePrefix=safe_strip(row_before.get("TubePrefix", "")),
-                    Use=int(use_amt),
-                    User=safe_strip(user_initials).upper(),
-                    Time_stamp=now_timestamp_str(),
-                    ShippingTo=safe_strip(shipping_to),
-                    Memo=safe_strip(row_before.get("Memo", "")),
-                )
-                append_row_by_header(service, USE_LOG_TAB, log_row)
-
-                if new_amount == 0:
-                    delete_row_by_index(service, FREEZER_TAB, idx0)
-                    st.success("Usage logged ✅ Saved to Use_log. TubeAmount reached 0 — Freezer row deleted.")
-                else:
-                    update_cell_by_index(service, FREEZER_TAB, idx0, "TubeAmount", int(new_amount))
-                    st.success(f"Usage logged ✅ Saved to Use_log. Used {int(use_amt)} (remaining: {new_amount})")
-
-                add_to_session_final_report(log_row)
-                st.rerun()
 
 # ============================================================
 # 3) Use_log viewer (optional)
