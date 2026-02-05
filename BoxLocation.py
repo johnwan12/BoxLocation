@@ -1,13 +1,5 @@
 # BoxLocation.py
-# Streamlit app: Box Location + LN Tank + Freezer Inventory + Use Log preview
-# Updates included:
-# 1) Max Box logic = MAX(numeric part) across 'boxNumber' + 'Freezer_Inventory' using BoxLabel_group/BoxNumber variants
-# 2) BoxID rule:
-#       Use the previous box = current_max_boxnumber
-#       Open a new box       = current_max_boxnumber + 1
-# 3) 'Group' renamed to 'BoxLabel_group'
-# 4) Freezer entry now includes: FreezerID, TubeAmount, Date Collected (and keeps requested order)
-# 5) Show "Max Box Logic" BEFORE BoxID selector
+# Streamlit app: Box Location + LN Tank + Freezer Inventory + Use Log (editable)
 
 import urllib.parse
 import urllib.request
@@ -46,7 +38,7 @@ TAB_MAP = {
 
 BOX_TAB         = "boxNumber"
 FREEZER_TAB     = "Freezer_Inventory"
-LN_TAB          = "LN3"           # single tab for LN1/LN2/LN3 (filtered by TankID)
+LN_TAB          = "LN3"     # single tab for LN1/LN2/LN3 (filtered by TankID)
 USE_LOG_TAB     = "Use_log"
 
 HIV_CODE  = {"HIV+": "HP", "HIV-": "HN"}
@@ -138,6 +130,29 @@ def append_row(tab: str, data: dict):
         body={"values": [row]},
     ).execute()
 
+def update_tab_from_df(tab: str, df: pd.DataFrame):
+    """Overwrite the entire sheet tab with df (header in row 1)."""
+    service = get_sheets_service()
+
+    df2 = df.copy()
+    df2.columns = [safe_strip(c) for c in df2.columns]
+    df2 = df2.fillna("").astype(str)
+
+    values = [df2.columns.tolist()] + df2.values.tolist()
+
+    service.spreadsheets().values().clear(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab}'!A:ZZ",
+        body={},
+    ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab}'!A1",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
+
 def qr_url(box_uid: str, size: int = QR_PX) -> str:
     text = urllib.parse.quote(box_uid)
     return f"https://quickchart.io/qr?text={text}&size={size}&ecLevel=Q&margin=1"
@@ -150,33 +165,19 @@ def fetch_image_bytes(url: str) -> bytes:
 # Max Box Logic (based on BoxLabel_group / BoxNumber variants)
 # ────────────────────────────────────────────────
 def find_boxlabel_col(df: pd.DataFrame) -> str | None:
-    """
-    Detect the column storing the box label/group across schema changes.
-    Accepts BoxLabel_group / BoxNumber / Group / Box Number.
-    """
+    """Detect box label/group column across schema changes."""
     if df.empty:
         return None
-
     normalized = {
         safe_strip(c).lower().replace(" ", "").replace("_", ""): c
         for c in df.columns
     }
-
-    candidates = [
-        "boxlabelgroup",   # BoxLabel_group
-        "boxnumber",       # BoxNumber
-        "group",           # legacy Group
-        "boxlabel",        # fallback
-    ]
-
-    for cand in candidates:
+    for cand in ["boxlabelgroup", "boxnumber", "group", "boxlabel"]:
         if cand in normalized:
             return normalized[cand]
-
     return None
 
 def extract_max_number(series: pd.Series) -> int:
-    """Extract first integer from strings like AD-BOX-012 -> 12; return max (or 0)."""
     if series is None or series.empty:
         return 0
     s = series.astype(str)
@@ -198,7 +199,7 @@ def current_max_boxnumber() -> int:
     )
 
 def resolve_boxid(choice: str) -> tuple[int, bool]:
-    """Use previous = max; Open new = max+1; if no boxes yet -> 1."""
+    """Use previous = max; Open new = max+1; if none -> 1."""
     mx = current_max_boxnumber()
     if mx == 0:
         return 1, True
@@ -401,8 +402,7 @@ if storage_type == "LN Tank":
 
 # ── Freezer ──────────────────────────────────────
 else:
-    # Freezer schema (added FreezerID, TubeAmount, Date Collected)
-    # We'll store FreezerID in the sheet too (from sidebar selection).
+    # Freezer schema (editable entry) includes FreezerID, TubeAmount, Date Collected
     FREEZER_HEADER = [
         "FreezerID",
         "Date Collected",
@@ -422,7 +422,6 @@ else:
     st.dataframe(fz_df, use_container_width=True, hide_index=True)
 
     with st.form("fz_add", clear_on_submit=True):
-        # Entry fields (includes FreezerID, TubeAmount, Date Collected)
         st.text_input("FreezerID", freezer, disabled=True)
 
         date = st.date_input("Date Collected", datetime.now(NY_TZ).date())
@@ -471,12 +470,40 @@ else:
                     st.error(f"Save failed: {e}")
 
 # ────────────────────────────────────────────────
-# Use Log (view only for now)
+# Use Log (permanent record – EDIT)
 # ────────────────────────────────────────────────
 st.divider()
-st.subheader("Use_log (permanent record – view only)")
+st.subheader("Use_log (permanent record – EDIT)")
+
 try:
     ul = read_tab(USE_LOG_TAB)
-    st.dataframe(ul, use_container_width=True, hide_index=True)
-except Exception:
-    st.info("Use_log tab not readable or empty.")
+
+    if ul.empty:
+        st.info("Use_log is empty.")
+    else:
+        edited = st.data_editor(
+            ul,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="use_log_editor",
+        )
+
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if st.button("💾 Save changes to Use_log", type="primary"):
+                try:
+                    update_tab_from_df(USE_LOG_TAB, edited)
+                    st.success("Use_log saved.")
+                except Exception as e:
+                    st.error(f"Save failed: {e}")
+
+        with c2:
+            st.download_button(
+                "Download Use_log CSV",
+                edited.to_csv(index=False),
+                "Use_log.csv",
+            )
+
+except Exception as e:
+    st.error(f"Use_log error: {e}")
