@@ -12,12 +12,7 @@
 #   Columns:
 #   FreezerID, BoxID, Prefix, Tube suffix, TubeAmount, Date Collected, BoxLabel_group,
 #   Samples Received, Missing, Urine Results, Collected By, Memo
-#   - AddFreezer Inventory Record:
-#       FreezerID = selected freezer
-#       Date Collected = today() (NY)
-#       BoxID option same as LN (current max or new = max+1)
-#       BoxLabel_group: Select existing OR Type new (and update pulldown list after save)
-#       Prefix: pulldown + Custom (type) (and update pulldown list after save)
+#   - AddFreezer Inventory Record (Option A Manual Full Fields + Duplicate check)
 #   - Log Usage (Freezer): subtract TubeAmount; if 0 delete row; append to Use_log; append to session Final Report
 #
 # ✅ Use_log:
@@ -55,7 +50,7 @@ if "last_qr_uid" not in st.session_state:
 if "usage_final_rows" not in st.session_state:
     st.session_state.usage_final_rows = []  # session final report (TubeAmount hidden)
 
-# ✅ NEW: Freezer Add dropdown caches (instant dropdown update behavior)
+# ✅ NEW: Freezer Add dropdown caches (kept; also useful for manual form suggestions)
 if "custom_boxlabel_groups" not in st.session_state:
     st.session_state.custom_boxlabel_groups = set()
 if "custom_prefixes" not in st.session_state:
@@ -116,6 +111,9 @@ def sheets_service():
 def safe_strip(x) -> str:
     return "" if x is None else str(x).strip()
 
+def normalize_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", safe_strip(s))
+
 def to_int_amount(x, default=0) -> int:
     try:
         s = safe_strip(x)
@@ -144,7 +142,7 @@ def today_str_ny() -> str:
     return d.strftime("%m/%d/%Y")
 
 def split_tube_number(t: str) -> Tuple[str, str]:
-    t = safe_strip(t)
+    t = normalize_spaces(t)
     if not t:
         return "", ""
     parts = t.split(" ", 1)
@@ -156,8 +154,9 @@ def qr_link_for_boxuid(box_uid: str, px: int = QR_PX) -> str:
     text = urllib.parse.quote(box_uid, safe="")
     return f"https://quickchart.io/qr?text={text}&size={px}&ecLevel=Q&margin=1"
 
-def fetch_bytes(url: str) -> bytes:
-    with urllib.request.urlopen(url) as resp:
+def fetch_bytes(url: str, timeout: int = 10) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 def read_tab(tab_name: str) -> pd.DataFrame:
@@ -271,7 +270,7 @@ def cleanup_zero_amount_rows(service, tab_name: str, df: pd.DataFrame, amount_co
     sheet_id = get_sheet_id(service, tab_name)
     zero_idxs.sort(reverse=True)
 
-    requests = [{
+    requests = [ {
         "deleteDimension": {
             "range": {
                 "sheetId": sheet_id,
@@ -280,9 +279,15 @@ def cleanup_zero_amount_rows(service, tab_name: str, df: pd.DataFrame, amount_co
                 "endIndex": idx0 + 2,
             }
         }
-    } for idx0 in zero_idxs]
+    } for idx0 in zero_idxs ]
 
-    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
+    # Chunk to avoid oversized payloads
+    chunk_size = 400
+    for i in range(0, len(requests), chunk_size):
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": requests[i:i+chunk_size]},
+        ).execute()
     return True
 
 def update_amount_by_index(service, tab_name: str, idx0: int, amount_col: str, new_amount: int):
@@ -359,7 +364,6 @@ def ensure_ln_header(service):
     set_header_if_blank(service, LN_TAB, recommended)
 
 def ensure_freezer_header(service):
-    # Your schema
     recommended = [
         "FreezerID",
         "BoxID",
@@ -462,13 +466,15 @@ def find_ln_row_index(ln_all_df: pd.DataFrame, tank_id: str, box_label_group: st
     df[TANK_COL] = df[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
     df[BOX_LABEL_COL] = df[BOX_LABEL_COL].astype(str).map(safe_strip)
     df[BOXID_COL] = df[BOXID_COL].astype(str).map(safe_strip)
-    df[TUBE_COL] = df[TUBE_COL].astype(str).map(safe_strip)
+    df[TUBE_COL] = df[TUBE_COL].astype(str).map(normalize_spaces)
+
+    tube_number_norm = normalize_spaces(tube_number)
 
     mask = (
         (df[TANK_COL] == safe_strip(tank_id).upper()) &
         (df[BOX_LABEL_COL] == safe_strip(box_label_group)) &
         (df[BOXID_COL] == safe_strip(boxid)) &
-        (df[TUBE_COL] == safe_strip(tube_number))
+        (df[TUBE_COL] == tube_number_norm)
     )
     hits = df[mask]
     if hits.empty:
@@ -490,14 +496,16 @@ def find_freezer_row_index(fr_all_df: pd.DataFrame, freezer_id: str, box_label_g
     df[BOX_LABEL_COL] = df[BOX_LABEL_COL].astype(str).map(safe_strip)
     df[BOXID_COL] = df[BOXID_COL].astype(str).map(safe_strip)
     df[PREFIX_COL] = df[PREFIX_COL].astype(str).map(lambda x: safe_strip(x).upper())
-    df[SUFFIX_COL] = df[SUFFIX_COL].astype(str).map(safe_strip)
+    df[SUFFIX_COL] = df[SUFFIX_COL].astype(str).map(lambda x: normalize_spaces(x))
+
+    suffix_norm = normalize_spaces(suffix)
 
     mask = (
         (df[FREEZER_COL] == safe_strip(freezer_id).upper()) &
         (df[BOX_LABEL_COL] == safe_strip(box_label_group)) &
         (df[BOXID_COL] == safe_strip(boxid)) &
         (df[PREFIX_COL] == safe_strip(prefix).upper()) &
-        (df[SUFFIX_COL] == safe_strip(suffix))
+        (df[SUFFIX_COL] == suffix_norm)
     )
     hits = df[mask]
     if hits.empty:
@@ -585,7 +593,8 @@ try:
     if use_log_df.empty:
         st.info("Use_log is empty.")
     else:
-        st.dataframe(use_log_df, use_container_width=True, hide_index=True)
+        n = st.slider("Rows to show", 50, 2000, 200, step=50)
+        st.dataframe(use_log_df.tail(n), use_container_width=True, hide_index=True)
 except Exception as e:
     st.warning(f"Unable to read Use_log: {e}")
 
@@ -655,8 +664,8 @@ else:
         with c4:
             tube_input = st.text_input("Tube Input", placeholder="e.g., 02 036").strip()
 
-        tube_number = f"{tube_prefix} {tube_input}" if tube_input else ""
-        tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
+        tube_number = normalize_spaces(f"{tube_prefix} {tube_input}" if tube_input else "")
+        tube_amount = st.number_input("TubeAmount", min_value=1, step=1, value=1)
         memo = st.text_area("Memo (optional)")
 
         preview_uid, preview_qr, preview_err = "", "", ""
@@ -763,7 +772,7 @@ else:
             dfv[TANK_COL] = dfv[TANK_COL].astype(str).map(lambda x: safe_strip(x).upper())
             dfv[BOX_LABEL_COL] = dfv[BOX_LABEL_COL].astype(str).map(safe_strip)
             dfv[BOXID_COL] = dfv[BOXID_COL].astype(str).map(safe_strip)
-            dfv[TUBE_COL] = dfv[TUBE_COL].astype(str).map(safe_strip)
+            dfv[TUBE_COL] = dfv[TUBE_COL].astype(str).map(normalize_spaces)
             dfv[AMT_COL] = pd.to_numeric(dfv[AMT_COL], errors="coerce").fillna(0).astype(int)
 
             dfv["_prefix"] = dfv[TUBE_COL].map(lambda x: split_tube_number(x)[0].upper())
@@ -819,7 +828,7 @@ else:
                         st.error("Please enter ShippingTo.")
                         st.stop()
 
-                    tube_number = f"{safe_strip(chosen_prefix).upper()} {safe_strip(chosen_suffix)}".strip()
+                    tube_number = normalize_spaces(f"{safe_strip(chosen_prefix).upper()} {safe_strip(chosen_suffix)}".strip())
 
                     idx0, cur_amount = find_ln_row_index(ln_all_df, chosen_tank, chosen_box, chosen_boxid, tube_number)
                     if idx0 is None:
@@ -879,7 +888,7 @@ else:
                     st.rerun()
 
 # ============================================================
-# 5) FREEZER MODULE (includes dynamic BoxLabel_group + Prefix)
+# 5) FREEZER MODULE (Option A Manual Full Fields + Duplicate check)
 # ============================================================
 st.divider()
 st.header("🧊 Freezer Inventory")
@@ -911,64 +920,29 @@ else:
     else:
         st.dataframe(fr_view_df, use_container_width=True, hide_index=True)
 
-    # ---------- AddFreezer Inventory Record ----------
-    st.subheader("➕ AddFreezer Inventory Record")
+    # ---------- AddFreezer Inventory Record (Manual / Full Fields) ----------
+    st.subheader("➕ AddFreezer Inventory Record (Manual / Full Fields)")
 
-    current_max_boxid = get_current_max_boxid(fr_view_df)
-    st.caption(f"Current max BoxID in {selected_freezer}: {current_max_boxid if current_max_boxid else '(none)'}")
+    default_freezer_id = safe_strip(selected_freezer).upper()
+    default_boxid = str(int(max(get_current_max_boxid(fr_view_df), 1)))
+    default_date = today_str_ny()
 
-    # Build dropdown lists from sheet + session caches
-    existing_groups = []
-    if fr_view_df is not None and (not fr_view_df.empty) and (BOX_LABEL_COL in fr_view_df.columns):
-        existing_groups = sorted([safe_strip(x) for x in fr_view_df[BOX_LABEL_COL].dropna().unique().tolist() if safe_strip(x)])
-    group_opts = sorted(set(existing_groups).union(set(st.session_state.custom_boxlabel_groups)))
+    with st.form("freezer_add_full", clear_on_submit=True):
+        freezer_id = st.text_input("FreezerID", value=default_freezer_id).strip().upper()
+        boxid = st.text_input("BoxID", value=default_boxid).strip()
 
-    existing_prefixes = []
-    if fr_view_df is not None and (not fr_view_df.empty) and (PREFIX_COL in fr_view_df.columns):
-        existing_prefixes = sorted([safe_strip(x).upper() for x in fr_view_df[PREFIX_COL].dropna().unique().tolist() if safe_strip(x)])
-    prefix_opts = sorted(set(existing_prefixes).union(set(st.session_state.custom_prefixes)))
-    if not prefix_opts:
-        prefix_opts = ["GICU", "HCCU"]
+        box_label_group = st.text_input("BoxLabel_group", placeholder="e.g., HP-COC / HN-CAN").strip()
+        prefix = st.text_input("Prefix", placeholder="e.g., GICU / HCCU").strip().upper()
+        tube_suffix = st.text_input("Tube suffix", placeholder="e.g., 02 036").strip()
+        tube_amount = st.number_input("TubeAmount", min_value=1, step=1, value=1)
 
-    with st.form("freezer_add", clear_on_submit=True):
-        freezer_id = safe_strip(selected_freezer).upper()
-        st.text_input("FreezerID (locked)", value=freezer_id, disabled=True)
+        date_collected = st.text_input("Date Collected", value=default_date).strip()
 
-        box_choice = st.radio("BoxID option", ["Using previous box", "Open a new box"], horizontal=True, key="fr_box_choice")
-        if box_choice == "Using previous box":
-            boxid_val = max(current_max_boxid, 1)
-        else:
-            boxid_val = (current_max_boxid + 1) if current_max_boxid >= 0 else 1
-        st.text_input("BoxID (locked)", value=str(int(boxid_val)), disabled=True)
-        boxid_input = str(int(boxid_val))
-
-        # ✅ BoxLabel_group: select or type new (type new will update pulldown after save)
-        group_mode = st.radio("BoxLabel_group", ["Select existing", "Type new"], horizontal=True, key="fr_group_mode")
-        if group_mode == "Select existing":
-            box_label_group = st.selectbox("BoxLabel_group (pulldown)", ["(select)"] + group_opts, key="fr_group_select")
-            if box_label_group == "(select)":
-                box_label_group = ""
-        else:
-            box_label_group = st.text_input("New BoxLabel_group", placeholder="e.g., HP-COC / HN-CAN / etc.").strip()
-
-        # ✅ Prefix: pulldown + custom
-        prefix_mode = st.selectbox("Prefix (pulldown)", prefix_opts + ["Custom (type)"], key="fr_prefix_mode")
-        if prefix_mode == "Custom (type)":
-            prefix = st.text_input("Custom Prefix", placeholder="e.g., ABCU").strip().upper()
-        else:
-            prefix = safe_strip(prefix_mode).upper()
-
-        tube_suffix = st.text_input("Tube suffix", placeholder="e.g., 02 036", key="fr_suffix_add").strip()
-        tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1, key="fr_amt_add")
-
-        date_collected = today_str_ny()
-        st.text_input("Date Collected (auto today)", value=date_collected, disabled=True)
-
-        c3, c4 = st.columns(2)
-        with c3:
+        c1, c2 = st.columns(2)
+        with c1:
             samples_received = st.text_input("Samples Received", placeholder="optional").strip()
             missing = st.text_input("Missing", placeholder="optional").strip()
-        with c4:
+        with c2:
             urine_results = st.text_input("Urine Results", placeholder="optional").strip()
             collected_by = st.text_input("Collected By", placeholder="optional").strip()
 
@@ -976,35 +950,78 @@ else:
 
         submitted_fr_add = st.form_submit_button("Save to Freezer_Inventory", type="primary")
         if submitted_fr_add:
+            if not freezer_id:
+                st.error("FreezerID is required."); st.stop()
+            if not boxid:
+                st.error("BoxID is required."); st.stop()
             if not box_label_group:
-                st.error("BoxLabel_group is required.")
-                st.stop()
+                st.error("BoxLabel_group is required."); st.stop()
             if not prefix:
-                st.error("Prefix is required.")
-                st.stop()
+                st.error("Prefix is required."); st.stop()
             if not tube_suffix:
-                st.error("Tube suffix is required.")
-                st.stop()
+                st.error("Tube suffix is required."); st.stop()
+
+            if not re.fullmatch(r"\d+", boxid):
+                st.error("BoxID must be an integer (digits only)."); st.stop()
+
+            # Build row
+            data = {
+                FREEZER_COL: freezer_id,
+                BOXID_COL: boxid,
+                PREFIX_COL: prefix,
+                SUFFIX_COL: normalize_spaces(tube_suffix),
+                AMT_COL: int(tube_amount),
+                DATE_COLLECTED_COL: date_collected,
+                BOX_LABEL_COL: box_label_group,
+                SAMPLES_RECEIVED_COL: samples_received,
+                MISSING_COL: missing,
+                URINE_RESULTS_COL: urine_results,
+                COLLECTED_BY_COL: collected_by,
+                MEMO_COL: memo,
+            }
+
+            # ✅ Duplicate check (same FreezerID/BoxLabel_group/BoxID/Prefix/Tube suffix)
+            def _norm(s: str) -> str:
+                return normalize_spaces(s)
+
+            key_freezer = _norm(freezer_id).upper()
+            key_group  = _norm(box_label_group)
+            key_boxid  = _norm(boxid)
+            key_prefix = _norm(prefix).upper()
+            key_suffix = _norm(tube_suffix)
+
+            if fr_all_df is not None and (not fr_all_df.empty):
+                needed = {FREEZER_COL, BOX_LABEL_COL, BOXID_COL, PREFIX_COL, SUFFIX_COL}
+                if needed.issubset(set(fr_all_df.columns)):
+                    dfchk = fr_all_df.copy()
+                    dfchk[FREEZER_COL] = dfchk[FREEZER_COL].astype(str).map(lambda x: _norm(x).upper())
+                    dfchk[BOX_LABEL_COL] = dfchk[BOX_LABEL_COL].astype(str).map(_norm)
+                    dfchk[BOXID_COL] = dfchk[BOXID_COL].astype(str).map(_norm)
+                    dfchk[PREFIX_COL] = dfchk[PREFIX_COL].astype(str).map(lambda x: _norm(x).upper())
+                    dfchk[SUFFIX_COL] = dfchk[SUFFIX_COL].astype(str).map(_norm)
+
+                    dup_mask = (
+                        (dfchk[FREEZER_COL] == key_freezer) &
+                        (dfchk[BOX_LABEL_COL] == key_group) &
+                        (dfchk[BOXID_COL] == key_boxid) &
+                        (dfchk[PREFIX_COL] == key_prefix) &
+                        (dfchk[SUFFIX_COL] == key_suffix)
+                    )
+                    if dup_mask.any():
+                        hit = dfchk.loc[dup_mask].head(1)
+                        existing_amt = hit.iloc[0].get(AMT_COL, "")
+                        st.error(
+                            f"Duplicate exists (same FreezerID/BoxLabel_group/BoxID/Prefix/Tube suffix). "
+                            f"Existing TubeAmount={existing_amt}. "
+                            f"Use Log Usage to subtract, or edit the existing row instead."
+                        )
+                        st.stop()
 
             try:
-                # ✅ update session caches so pulldowns include new values
+                # update caches for convenience elsewhere
                 st.session_state.custom_boxlabel_groups.add(box_label_group)
                 st.session_state.custom_prefixes.add(prefix)
 
-                data = {
-                    FREEZER_COL: freezer_id,
-                    BOXID_COL: boxid_input,
-                    PREFIX_COL: prefix,
-                    SUFFIX_COL: tube_suffix,
-                    AMT_COL: int(tube_amount),
-                    DATE_COLLECTED_COL: date_collected,
-                    BOX_LABEL_COL: box_label_group,
-                    SAMPLES_RECEIVED_COL: samples_received,
-                    MISSING_COL: missing,
-                    URINE_RESULTS_COL: urine_results,
-                    COLLECTED_BY_COL: collected_by,
-                    MEMO_COL: memo,
-                }
                 append_row_by_header(service, FREEZER_TAB, data)
                 st.success("Saved ✅ Freezer_Inventory record")
                 st.rerun()
@@ -1033,7 +1050,7 @@ else:
             dfv[BOX_LABEL_COL] = dfv[BOX_LABEL_COL].astype(str).map(safe_strip)
             dfv[BOXID_COL] = dfv[BOXID_COL].astype(str).map(safe_strip)
             dfv[PREFIX_COL] = dfv[PREFIX_COL].astype(str).map(lambda x: safe_strip(x).upper())
-            dfv[SUFFIX_COL] = dfv[SUFFIX_COL].astype(str).map(safe_strip)
+            dfv[SUFFIX_COL] = dfv[SUFFIX_COL].astype(str).map(lambda x: normalize_spaces(x))
             dfv[AMT_COL] = pd.to_numeric(dfv[AMT_COL], errors="coerce").fillna(0).astype(int)
 
             freezer_opts = sorted([f for f in dfv[FREEZER_COL].dropna().unique().tolist() if safe_strip(f)])
