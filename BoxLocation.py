@@ -1,13 +1,12 @@
 # BoxLocation.py
 # Streamlit app: Box Location + LN Tank + Freezer Inventory + Use Log preview
 # Updates included:
-# 1) Max Box logic is based on MAX(BoxLabel_group numeric part) across 'boxNumber' + 'Freezer_Inventory'
+# 1) Max Box logic = MAX(numeric part) across 'boxNumber' + 'Freezer_Inventory' using BoxLabel_group/BoxNumber variants
 # 2) BoxID rule:
 #       Use the previous box = current_max_boxnumber
 #       Open a new box       = current_max_boxnumber + 1
-# 3) 'Group' column renamed to 'BoxLabel_group'
-# 4) Freezer entry order:
-#       Date collected, StudyCode, BoxLabel_group, Prefix, Tube suffix, BoxID, All Collected By, Memo
+# 3) 'Group' renamed to 'BoxLabel_group'
+# 4) Freezer entry now includes: FreezerID, TubeAmount, Date Collected (and keeps requested order)
 # 5) Show "Max Box Logic" BEFORE BoxID selector
 
 import urllib.parse
@@ -163,13 +162,11 @@ def find_boxlabel_col(df: pd.DataFrame) -> str | None:
         for c in df.columns
     }
 
-    # Prefer new name first
     candidates = [
         "boxlabelgroup",   # BoxLabel_group
         "boxnumber",       # BoxNumber
         "group",           # legacy Group
         "boxlabel",        # fallback
-        "boxnumbergroup",  # rare variants
     ]
 
     for cand in candidates:
@@ -179,12 +176,7 @@ def find_boxlabel_col(df: pd.DataFrame) -> str | None:
     return None
 
 def extract_max_number(series: pd.Series) -> int:
-    """
-    Extract first integer from strings like:
-      AD-BOX-012 -> 12
-      LN3-R01-HP-CAN-03 -> 3
-    Return max; if none found -> 0.
-    """
+    """Extract first integer from strings like AD-BOX-012 -> 12; return max (or 0)."""
     if series is None or series.empty:
         return 0
     s = series.astype(str)
@@ -206,14 +198,10 @@ def current_max_boxnumber() -> int:
     )
 
 def resolve_boxid(choice: str) -> tuple[int, bool]:
-    """
-    BoxID rule:
-      Use previous box -> current_max_boxnumber
-      Open a new box   -> current_max_boxnumber + 1
-    """
+    """Use previous = max; Open new = max+1; if no boxes yet -> 1."""
     mx = current_max_boxnumber()
     if mx == 0:
-        return 1, True  # first-ever box
+        return 1, True
     if choice == "Open a new box":
         return mx + 1, True
     return mx, False
@@ -260,8 +248,6 @@ try:
     st.subheader("StudyID → Box Label")
     box_map = {}
     box_df = read_tab(BOX_TAB)
-
-    # Detect which column holds the box label/group in boxNumber tab
     label_col = find_boxlabel_col(box_df) if not box_df.empty else None
 
     if (not box_df.empty) and label_col:
@@ -299,7 +285,6 @@ else:
 
 # ── LN Tank ──────────────────────────────────────
 if storage_type == "LN Tank":
-    # LN schema uses BoxLabel_group (renamed from Group/BoxNumber)
     set_header_if_blank(
         LN_TAB,
         ["TankID","RackNumber","BoxLabel_group","BoxUID","TubeNumber","TubeAmount","Memo","BoxID","QRCodeLink"],
@@ -334,7 +319,7 @@ if storage_type == "LN Tank":
         amount = st.number_input("Tube count", 0, step=1, value=1)
         memo   = st.text_area("Memo", height=90)
 
-        # --- BoxUID preview (robust)
+        # --- BoxUID preview
         prefix_str = f"{tank}-R{rack:02d}-{HIV_CODE[hiv]}-{DRUG_CODE[drug]}-"
         seq = 1
         try:
@@ -361,7 +346,6 @@ if storage_type == "LN Tank":
                 st.error("Tube suffix required.")
             else:
                 try:
-                    # Recompute seq on save from latest data (race-safe)
                     ln_df_latest = read_tab(LN_TAB)
                     view_latest = (
                         ln_df_latest[ln_df_latest["TankID"].astype(str).str.upper() == tank.upper()]
@@ -417,13 +401,16 @@ if storage_type == "LN Tank":
 
 # ── Freezer ──────────────────────────────────────
 else:
-    # Freezer schema + header order exactly as requested
+    # Freezer schema (added FreezerID, TubeAmount, Date Collected)
+    # We'll store FreezerID in the sheet too (from sidebar selection).
     FREEZER_HEADER = [
-        "Date collected",
+        "FreezerID",
+        "Date Collected",
         "StudyCode",
         "BoxLabel_group",
         "Prefix",
         "Tube suffix",
+        "TubeAmount",
         "BoxID",
         "All Collected By",
         "Memo",
@@ -435,14 +422,18 @@ else:
     st.dataframe(fz_df, use_container_width=True, hide_index=True)
 
     with st.form("fz_add", clear_on_submit=True):
-        # Entry order exactly as requested
-        date = st.date_input("Date collected", datetime.now(NY_TZ).date())
+        # Entry fields (includes FreezerID, TubeAmount, Date Collected)
+        st.text_input("FreezerID", freezer, disabled=True)
+
+        date = st.date_input("Date Collected", datetime.now(NY_TZ).date())
         study = st.text_input("StudyCode").strip()
         boxlabel = st.text_input("BoxLabel_group", placeholder="e.g. HP-COC").strip()
 
         c1, c2 = st.columns(2)
         prefix = c1.text_input("Prefix", placeholder="e.g. Serum / DNA").strip()
         tube_suffix = c2.text_input("Tube suffix", placeholder="e.g. 02 036").strip()
+
+        tube_amount = st.number_input("TubeAmount", min_value=0, step=1, value=1)
 
         # Max Box Logic BEFORE BoxID
         mx_box = current_max_boxnumber()
@@ -461,11 +452,13 @@ else:
             else:
                 try:
                     row = {
-                        "Date collected": date.strftime("%m/%d/%Y"),
+                        "FreezerID": freezer,
+                        "Date Collected": date.strftime("%m/%d/%Y"),
                         "StudyCode": study,
                         "BoxLabel_group": boxlabel,
                         "Prefix": prefix,
                         "Tube suffix": tube_suffix,
+                        "TubeAmount": tube_amount,
                         "BoxID": str(boxid),
                         "All Collected By": collected_by,
                         "Memo": memo,
